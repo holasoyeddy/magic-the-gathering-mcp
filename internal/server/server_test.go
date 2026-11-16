@@ -15,9 +15,17 @@ import (
 )
 
 type fakeAdapter struct {
-	result card.OracleCardResult
-	err    error
-	calls  []card.OracleCardSelector
+	result         card.OracleCardResult
+	err            error
+	calls          []card.OracleCardSelector
+	printingResult card.PrintingResult
+	printingErr    error
+	printingCalls  []card.PrintingSelector
+}
+
+func (f *fakeAdapter) GetPrinting(_ context.Context, selector card.PrintingSelector) (card.PrintingResult, error) {
+	f.printingCalls = append(f.printingCalls, selector)
+	return f.printingResult, f.printingErr
 }
 
 func TestExpectedAdapterFailuresHaveStableToolCodes(t *testing.T) {
@@ -101,14 +109,14 @@ func connect(t *testing.T, adapter card.Adapter) *mcp.ClientSession {
 	return clientSession
 }
 
-func TestDiscoveryListsOnlyGetOracleCard(t *testing.T) {
+func TestDiscoveryListsExactLookupToolsInDeterministicOrder(t *testing.T) {
 	session := connect(t, &fakeAdapter{})
 	result, err := session.ListTools(context.Background(), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(result.Tools) != 1 || result.Tools[0].Name != "get_oracle_card" {
-		t.Fatalf("tools = %#v, want only get_oracle_card", result.Tools)
+	if len(result.Tools) != 2 || result.Tools[0].Name != "get_oracle_card" || result.Tools[1].Name != "get_printing" {
+		t.Fatalf("tools = %#v, want get_oracle_card then get_printing", result.Tools)
 	}
 }
 
@@ -202,5 +210,72 @@ func TestExactLookupMissIsNotFound(t *testing.T) {
 	var problem map[string]any
 	if json.Unmarshal([]byte(text), &problem) != nil || problem["code"] != "not_found" {
 		t.Fatalf("error = %q", text)
+	}
+}
+
+func TestGetPrintingBySetAndCollectorReturnsLocalizedMultiFaceFacts(t *testing.T) {
+	oracleID := "11111111-1111-4111-8111-111111111111"
+	printedName, printedType, printedText, faceName := "Ejemplo", "Criatura", "Texto.", "Frente"
+	adapter := &fakeAdapter{printingResult: card.PrintingResult{
+		Printing: card.Printing{
+			ScryfallID: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", OracleID: &oracleID,
+			Name: "Example // Reverse", Language: "es", PrintedName: &printedName,
+			PrintedTypeLine: &printedType, PrintedText: &printedText, SetCode: "neo", SetName: "Kamigawa: Neon Dynasty",
+			CollectorNumber: "123a", Rarity: "rare", ReleasedAt: "2022-02-18", Finishes: []string{"nonfoil", "foil"},
+			Frame: "2015", FrameEffects: []string{"showcase"}, BorderColor: "black", FullArt: true,
+			Faces: []card.PrintingFace{{Name: "Example", PrintedName: &faceName, ImageURLs: map[string]string{"normal": "https://cards.scryfall.io/normal/front.jpg"}}, {Name: "Reverse"}},
+		}, SourceURL: "https://api.scryfall.com/cards/neo/123a", FetchedAt: time.Date(2026, 11, 16, 12, 0, 0, 0, time.FixedZone("test", -6*60*60)),
+	}}
+	result, err := connect(t, adapter).CallTool(context.Background(), &mcp.CallToolParams{Name: "get_printing", Arguments: map[string]any{"set_code": " NEO ", "collector_number": "123a"}})
+	if err != nil || result.IsError {
+		t.Fatalf("result=%#v err=%v", result, err)
+	}
+	if len(adapter.printingCalls) != 1 || adapter.printingCalls[0].SetCode != "neo" || adapter.printingCalls[0].CollectorNumber != "123a" {
+		t.Fatalf("calls = %#v", adapter.printingCalls)
+	}
+	b, _ := json.Marshal(result.StructuredContent)
+	var got card.PrintingResult
+	if err := json.Unmarshal(b, &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.Printing.Language != "es" || got.Printing.PrintedName == nil || *got.Printing.PrintedName != "Ejemplo" || len(got.Printing.Faces) != 2 || got.Printing.Faces[0].Name != "Example" {
+		t.Fatalf("printing = %#v", got.Printing)
+	}
+	var public map[string]any
+	if err := json.Unmarshal(b, &public); err != nil {
+		t.Fatal(err)
+	}
+	printing := public["printing"].(map[string]any)
+	if got.Printing.OracleID == nil || printing["oracle_text"] != nil || printing["mana_value"] != nil || printing["color_identity"] != nil {
+		t.Fatal("printing must reference Oracle identity without embedding Oracle card fields")
+	}
+	if got.FetchedAt.Format(time.RFC3339) != "2026-11-16T18:00:00Z" {
+		t.Fatalf("fetched_at = %s", got.FetchedAt)
+	}
+}
+
+func TestGetPrintingByScryfallID(t *testing.T) {
+	id := "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+	adapter := &fakeAdapter{printingResult: card.PrintingResult{FetchedAt: time.Now()}}
+	result, err := connect(t, adapter).CallTool(context.Background(), &mcp.CallToolParams{Name: "get_printing", Arguments: map[string]any{"scryfall_id": id}})
+	if err != nil || result.IsError {
+		t.Fatalf("result=%#v err=%v", result, err)
+	}
+	if len(adapter.printingCalls) != 1 || adapter.printingCalls[0].ScryfallID != id {
+		t.Fatalf("calls = %#v", adapter.printingCalls)
+	}
+}
+
+func TestInvalidPrintingSelectorsDoNotCallAdapter(t *testing.T) {
+	tests := []map[string]any{{}, {"scryfall_id": "bad"}, {"set_code": "neo"}, {"collector_number": "123a"}, {"set_code": "!", "collector_number": "1"}, {"scryfall_id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", "set_code": "neo", "collector_number": "1"}}
+	for _, args := range tests {
+		adapter := &fakeAdapter{}
+		result, err := connect(t, adapter).CallTool(context.Background(), &mcp.CallToolParams{Name: "get_printing", Arguments: args})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !result.IsError || len(adapter.printingCalls) != 0 {
+			t.Fatalf("args=%#v result=%#v calls=%#v", args, result, adapter.printingCalls)
+		}
 	}
 }

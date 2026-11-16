@@ -72,10 +72,37 @@ type upstreamCard struct {
 	CardFaces     []upstreamFace `json:"card_faces"`
 }
 type upstreamFace struct {
-	Name       string  `json:"name"`
-	ManaCost   *string `json:"mana_cost"`
-	TypeLine   *string `json:"type_line"`
-	OracleText *string `json:"oracle_text"`
+	Name        string            `json:"name"`
+	PrintedName *string           `json:"printed_name"`
+	ManaCost    *string           `json:"mana_cost"`
+	TypeLine    *string           `json:"type_line"`
+	OracleText  *string           `json:"oracle_text"`
+	PrintedText *string           `json:"printed_text"`
+	ImageURIs   map[string]string `json:"image_uris"`
+}
+
+type upstreamPrinting struct {
+	ID              string            `json:"id"`
+	OracleID        *string           `json:"oracle_id"`
+	Name            string            `json:"name"`
+	Lang            string            `json:"lang"`
+	PrintedName     *string           `json:"printed_name"`
+	PrintedTypeLine *string           `json:"printed_type_line"`
+	PrintedText     *string           `json:"printed_text"`
+	Set             string            `json:"set"`
+	SetName         string            `json:"set_name"`
+	CollectorNumber string            `json:"collector_number"`
+	Rarity          string            `json:"rarity"`
+	ReleasedAt      string            `json:"released_at"`
+	Artist          *string           `json:"artist"`
+	Finishes        []string          `json:"finishes"`
+	Frame           string            `json:"frame"`
+	FrameEffects    []string          `json:"frame_effects"`
+	BorderColor     string            `json:"border_color"`
+	FullArt         bool              `json:"full_art"`
+	Textless        bool              `json:"textless"`
+	ImageURIs       map[string]string `json:"image_uris"`
+	CardFaces       []upstreamFace    `json:"card_faces"`
 }
 
 func (a *Adapter) GetOracleCard(ctx context.Context, selector card.OracleCardSelector) (card.OracleCardResult, error) {
@@ -207,6 +234,64 @@ func (r *limiterRegistry) wait(ctx context.Context, host string, interval time.D
 	case <-timer.C:
 		return nil
 	}
+}
+
+func (a *Adapter) GetPrinting(ctx context.Context, selector card.PrintingSelector) (card.PrintingResult, error) {
+	endpoint := a.baseURL + "/cards/" + url.PathEscape(selector.ScryfallID)
+	if selector.ScryfallID == "" {
+		endpoint = a.baseURL + "/cards/" + url.PathEscape(strings.ToLower(selector.SetCode)) + "/" + url.PathEscape(selector.CollectorNumber)
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+	if err != nil {
+		return card.PrintingResult{}, err
+	}
+	req.Header.Set("Accept", "application/json")
+	req.Header.Set("User-Agent", "magic-the-gathering-mcp/0.1 (+https://github.com/holasoyeddy/magic-the-gathering-mcp)")
+	response, err := a.client.Do(req)
+	if err != nil {
+		return card.PrintingResult{}, err
+	}
+	defer response.Body.Close()
+	if response.StatusCode == http.StatusNotFound {
+		return card.PrintingResult{}, card.ErrNotFound
+	}
+	if response.StatusCode < 200 || response.StatusCode >= 300 {
+		return card.PrintingResult{}, fmt.Errorf("scryfall returned HTTP %d", response.StatusCode)
+	}
+	var raw upstreamPrinting
+	if err := json.NewDecoder(response.Body).Decode(&raw); err != nil {
+		return card.PrintingResult{}, err
+	}
+	return card.PrintingResult{Printing: translatePrinting(raw), SourceURL: endpoint, FetchedAt: a.now().UTC(), Stale: false}, nil
+}
+
+func translatePrinting(raw upstreamPrinting) card.Printing {
+	faces := make([]card.PrintingFace, 0, len(raw.CardFaces))
+	for _, face := range raw.CardFaces {
+		faces = append(faces, card.PrintingFace{Name: face.Name, PrintedName: face.PrintedName, ManaCost: face.ManaCost, TypeLine: face.TypeLine, PrintedText: face.PrintedText, ImageURLs: scryfallImages(face.ImageURIs)})
+	}
+	return card.Printing{
+		ScryfallID: raw.ID, OracleID: raw.OracleID, Name: raw.Name, Language: raw.Lang,
+		PrintedName: raw.PrintedName, PrintedTypeLine: raw.PrintedTypeLine, PrintedText: raw.PrintedText,
+		SetCode: strings.ToLower(raw.Set), SetName: raw.SetName, CollectorNumber: raw.CollectorNumber,
+		Rarity: raw.Rarity, ReleasedAt: raw.ReleasedAt, Artist: raw.Artist, Finishes: nonNil(raw.Finishes),
+		Frame: raw.Frame, FrameEffects: raw.FrameEffects, BorderColor: raw.BorderColor, FullArt: raw.FullArt, Textless: raw.Textless,
+		ImageURLs: scryfallImages(raw.ImageURIs), Faces: faces,
+	}
+}
+
+func scryfallImages(images map[string]string) map[string]string {
+	var filtered map[string]string
+	for size, value := range images {
+		parsed, err := url.Parse(value)
+		if err == nil && parsed.Scheme == "https" && parsed.Hostname() == "cards.scryfall.io" {
+			if filtered == nil {
+				filtered = make(map[string]string)
+			}
+			filtered[size] = value
+		}
+	}
+	return filtered
 }
 
 func translate(raw upstreamCard) card.OracleCard {
