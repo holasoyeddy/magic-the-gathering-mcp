@@ -144,6 +144,15 @@ func (c *Cache) GetCardLegality(ctx context.Context, selector card.OracleCardSel
 	return value.(card.LegalityResult), nil
 }
 
+func (c *Cache) GetRulings(ctx context.Context, selector card.OracleCardSelector) (card.RulingsResult, error) {
+	key := rulingsKey(selector)
+	value, err := c.get(ctx, "rulings", key, func() (any, error) { return c.inner.GetRulings(ctx, selector) })
+	if err != nil {
+		return card.RulingsResult{}, err
+	}
+	return value.(card.RulingsResult), nil
+}
+
 func oracleKey(s card.OracleCardSelector) string {
 	if s.OracleID != "" {
 		return "v1:oracle-card:oracle-id:" + strings.ToLower(strings.TrimSpace(s.OracleID))
@@ -161,6 +170,12 @@ func legalityKey(s card.OracleCardSelector) string {
 		return "v1:card-legality:oracle-id:" + strings.ToLower(strings.TrimSpace(s.OracleID))
 	}
 	return "v1:card-legality:exact-name:" + strings.ToLower(strings.TrimSpace(s.Name))
+}
+func rulingsKey(s card.OracleCardSelector) string {
+	if s.OracleID != "" {
+		return "v1:rulings:oracle-id:" + strings.ToLower(strings.TrimSpace(s.OracleID))
+	}
+	return "v1:rulings:exact-name:" + strings.ToLower(strings.TrimSpace(s.Name))
 }
 
 func (c *Cache) get(ctx context.Context, operation, key string, live func() (any, error)) (any, error) {
@@ -218,6 +233,9 @@ func markStale(value any) any {
 	case card.LegalityResult:
 		result.Stale = true
 		return result
+	case card.RulingsResult:
+		result.Stale = true
+		return result
 	}
 	return value
 }
@@ -241,6 +259,8 @@ func (c *Cache) read(operation, key string) (any, time.Duration, bool) {
 		value = &card.PrintingResult{}
 	case "card-legality":
 		value = &card.LegalityResult{}
+	case "rulings":
+		value = &card.RulingsResult{}
 	default:
 		return nil, 0, false
 	}
@@ -273,6 +293,9 @@ func (c *Cache) read(operation, key string) (any, time.Duration, bool) {
 	case *card.LegalityResult:
 		result.Stale = false
 		return *result, age, true
+	case *card.RulingsResult:
+		result.Stale = false
+		return *result, age, true
 	}
 	return nil, 0, false
 }
@@ -289,6 +312,8 @@ func (c *Cache) write(operation, key string, value any) error {
 	case card.PrintingResult:
 		fetched = result.FetchedAt.UTC()
 	case card.LegalityResult:
+		fetched = result.FetchedAt.UTC()
+	case card.RulingsResult:
 		fetched = result.FetchedAt.UTC()
 	}
 	if fetched.IsZero() {

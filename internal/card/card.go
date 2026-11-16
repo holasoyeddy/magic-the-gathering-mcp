@@ -108,6 +108,18 @@ type LegalityResult struct {
 	Stale     bool         `json:"stale"`
 }
 
+type Ruling struct {
+	PublishedAt string `json:"published_at"`
+	Comment     string `json:"comment"`
+}
+
+type RulingsResult struct {
+	Rulings   []Ruling  `json:"rulings"`
+	SourceURL string    `json:"source_url"`
+	FetchedAt time.Time `json:"fetched_at"`
+	Stale     bool      `json:"stale"`
+}
+
 var ErrNotFound = errors.New("oracle card not found")
 
 var (
@@ -120,6 +132,7 @@ var (
 type Adapter interface {
 	GetOracleCard(context.Context, OracleCardSelector) (OracleCardResult, error)
 	GetPrinting(context.Context, PrintingSelector) (PrintingResult, error)
+	GetRulings(context.Context, OracleCardSelector) (RulingsResult, error)
 }
 
 type LegalityAdapter interface {

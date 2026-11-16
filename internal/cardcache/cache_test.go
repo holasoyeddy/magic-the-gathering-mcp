@@ -43,6 +43,9 @@ func (f *fake) GetPrinting(context.Context, card.PrintingSelector) (card.Printin
 	f.mu.Unlock()
 	return f.printing, f.printingErr
 }
+func (f *fake) GetRulings(context.Context, card.OracleCardSelector) (card.RulingsResult, error) {
+	return card.RulingsResult{}, errors.New("unexpected rulings call")
+}
 
 func TestFreshOracleCardSurvivesRestartWithoutUpstreamCall(t *testing.T) {
 	dir := t.TempDir()

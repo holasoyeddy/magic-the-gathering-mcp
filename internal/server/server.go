@@ -6,6 +6,7 @@ import (
 	"errors"
 	"log"
 	"regexp"
+	"sort"
 	"strings"
 
 	"github.com/holasoyeddy/magic-the-gathering-mcp/internal/card"
@@ -115,6 +116,42 @@ func New(adapter card.Adapter) *mcp.Server {
 		if err != nil {
 			return exactLookupError("get_card_legality", "no Oracle card matched the exact selector", err)
 		}
+		result.FetchedAt = result.FetchedAt.UTC()
+		return &mcp.CallToolResult{StructuredContent: result}, nil
+	})
+	server.AddTool(&mcp.Tool{
+		Name:        "get_rulings",
+		Description: "Resolve official Oracle-card rulings by exact name or Oracle ID.",
+		InputSchema: map[string]any{
+			"type": "object", "additionalProperties": false,
+			"properties": map[string]any{
+				"name":      map[string]any{"type": "string", "description": "Canonical card name matched exactly, case-insensitively."},
+				"oracle_id": map[string]any{"type": "string", "format": "uuid", "description": "Oracle identity UUID."},
+			},
+		},
+	}, func(ctx context.Context, request *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		var input struct {
+			Name     string `json:"name"`
+			OracleID string `json:"oracle_id"`
+		}
+		if err := json.Unmarshal(request.Params.Arguments, &input); err != nil {
+			return toolError("invalid_identifier", "provide exactly one valid selector"), nil
+		}
+		input.Name = strings.TrimSpace(input.Name)
+		input.OracleID = strings.TrimSpace(input.OracleID)
+		if (input.Name == "") == (input.OracleID == "") || (input.OracleID != "" && !uuidPattern.MatchString(input.OracleID)) {
+			return toolError("invalid_identifier", "provide exactly one valid name or Oracle ID"), nil
+		}
+		result, err := adapter.GetRulings(ctx, card.OracleCardSelector{Name: input.Name, OracleID: input.OracleID})
+		if err != nil {
+			return exactLookupError("get_rulings", "no Oracle card matched the exact selector", err)
+		}
+		sort.SliceStable(result.Rulings, func(i, j int) bool {
+			if result.Rulings[i].PublishedAt == result.Rulings[j].PublishedAt {
+				return result.Rulings[i].Comment < result.Rulings[j].Comment
+			}
+			return result.Rulings[i].PublishedAt > result.Rulings[j].PublishedAt
+		})
 		result.FetchedAt = result.FetchedAt.UTC()
 		return &mcp.CallToolResult{StructuredContent: result}, nil
 	})

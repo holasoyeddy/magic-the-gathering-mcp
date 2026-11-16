@@ -21,6 +21,14 @@ type fakeAdapter struct {
 	printingResult card.PrintingResult
 	printingErr    error
 	printingCalls  []card.PrintingSelector
+	rulingsResult  card.RulingsResult
+	rulingsErr     error
+	rulingsCalls   []card.OracleCardSelector
+}
+
+func (f *fakeAdapter) GetRulings(_ context.Context, selector card.OracleCardSelector) (card.RulingsResult, error) {
+	f.rulingsCalls = append(f.rulingsCalls, selector)
+	return f.rulingsResult, f.rulingsErr
 }
 
 func (f *fakeAdapter) GetPrinting(_ context.Context, selector card.PrintingSelector) (card.PrintingResult, error) {
@@ -119,6 +127,9 @@ func (f adapterFunc) GetOracleCard(ctx context.Context, selector card.OracleCard
 func (f adapterFunc) GetPrinting(context.Context, card.PrintingSelector) (card.PrintingResult, error) {
 	return card.PrintingResult{}, errors.New("unexpected printing call")
 }
+func (f adapterFunc) GetRulings(context.Context, card.OracleCardSelector) (card.RulingsResult, error) {
+	return card.RulingsResult{}, errors.New("unexpected rulings call")
+}
 
 func (f *fakeAdapter) GetOracleCard(_ context.Context, selector card.OracleCardSelector) (card.OracleCardResult, error) {
 	f.calls = append(f.calls, selector)
@@ -149,8 +160,81 @@ func TestDiscoveryListsExactLookupToolsInDeterministicOrder(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(result.Tools) != 3 || result.Tools[0].Name != "get_card_legality" || result.Tools[1].Name != "get_oracle_card" || result.Tools[2].Name != "get_printing" {
+	if len(result.Tools) != 4 || result.Tools[0].Name != "get_card_legality" || result.Tools[1].Name != "get_oracle_card" || result.Tools[2].Name != "get_printing" || result.Tools[3].Name != "get_rulings" {
 		t.Fatalf("tools = %#v, want deterministic alphabetical order", result.Tools)
+	}
+}
+
+func TestGetRulingsByExactNameReturnsNewestFirstWithDeterministicTies(t *testing.T) {
+	adapter := &fakeAdapter{rulingsResult: card.RulingsResult{
+		Rulings: []card.Ruling{
+			{PublishedAt: "2020-01-01", Comment: "Zulu"},
+			{PublishedAt: "2024-02-03", Comment: "Beta"},
+			{PublishedAt: "2024-02-03", Comment: "Alpha"},
+		},
+		SourceURL: "https://api.scryfall.com/cards/11111111-1111-4111-8111-111111111111/rulings",
+		FetchedAt: time.Date(2026, 11, 16, 12, 0, 0, 0, time.FixedZone("test", -6*60*60)),
+	}}
+	result, err := connect(t, adapter).CallTool(context.Background(), &mcp.CallToolParams{Name: "get_rulings", Arguments: map[string]any{"name": " LiGhTnInG BoLt "}})
+	if err != nil || result.IsError {
+		t.Fatalf("result=%#v err=%v", result, err)
+	}
+	if len(adapter.rulingsCalls) != 1 || adapter.rulingsCalls[0].Name != "LiGhTnInG BoLt" {
+		t.Fatalf("calls=%#v", adapter.rulingsCalls)
+	}
+	b, _ := json.Marshal(result.StructuredContent)
+	var got card.RulingsResult
+	if err := json.Unmarshal(b, &got); err != nil {
+		t.Fatal(err)
+	}
+	if len(got.Rulings) != 3 || got.Rulings[0].Comment != "Alpha" || got.Rulings[1].Comment != "Beta" || got.Rulings[2].PublishedAt != "2020-01-01" {
+		t.Fatalf("rulings=%#v", got.Rulings)
+	}
+	if got.FetchedAt.Format(time.RFC3339) != "2026-11-16T18:00:00Z" || got.SourceURL == "" || got.Stale {
+		t.Fatalf("provenance=%#v", got)
+	}
+}
+
+func TestGetRulingsAcceptsOracleIDAndEmptyRulings(t *testing.T) {
+	id := "11111111-1111-4111-8111-111111111111"
+	adapter := &fakeAdapter{rulingsResult: card.RulingsResult{Rulings: []card.Ruling{}, FetchedAt: time.Now()}}
+	result, err := connect(t, adapter).CallTool(context.Background(), &mcp.CallToolParams{Name: "get_rulings", Arguments: map[string]any{"oracle_id": id}})
+	if err != nil || result.IsError {
+		t.Fatalf("result=%#v err=%v", result, err)
+	}
+	if len(adapter.rulingsCalls) != 1 || adapter.rulingsCalls[0].OracleID != id {
+		t.Fatalf("calls=%#v", adapter.rulingsCalls)
+	}
+	b, _ := json.Marshal(result.StructuredContent)
+	var got card.RulingsResult
+	if json.Unmarshal(b, &got) != nil || got.Rulings == nil || len(got.Rulings) != 0 {
+		t.Fatalf("result=%s", b)
+	}
+}
+
+func TestGetRulingsRejectsInvalidSelectorsAndMapsFailures(t *testing.T) {
+	for _, args := range []map[string]any{{}, {"name": "Example", "oracle_id": "11111111-1111-4111-8111-111111111111"}, {"oracle_id": "bad"}} {
+		adapter := &fakeAdapter{}
+		result, err := connect(t, adapter).CallTool(context.Background(), &mcp.CallToolParams{Name: "get_rulings", Arguments: args})
+		if err != nil || !result.IsError || len(adapter.rulingsCalls) != 0 {
+			t.Fatalf("args=%#v result=%#v err=%v calls=%#v", args, result, err, adapter.rulingsCalls)
+		}
+		if text := result.Content[0].(*mcp.TextContent).Text; !strings.Contains(text, `"code":"invalid_identifier"`) {
+			t.Fatalf("error=%s", text)
+		}
+	}
+	for _, tt := range []struct {
+		failure error
+		code    string
+	}{{card.ErrNotFound, "not_found"}, {card.ErrRateLimited, "rate_limited"}, {card.ErrUpstreamUnavailable, "upstream_unavailable"}} {
+		adapter := &fakeAdapter{rulingsErr: fmt.Errorf("private: %w", tt.failure)}
+		result, err := connect(t, adapter).CallTool(context.Background(), &mcp.CallToolParams{Name: "get_rulings", Arguments: map[string]any{"name": "Missing"}})
+		if err != nil || !result.IsError {
+			t.Fatalf("result=%#v err=%v", result, err)
+		}
+		if text := result.Content[0].(*mcp.TextContent).Text; !strings.Contains(text, `"code":"`+tt.code+`"`) || strings.Contains(text, "private") {
+			t.Fatalf("error=%s", text)
+		}
 	}
 }
 

@@ -286,6 +286,34 @@ func TestScryfallNotFoundIsDomainNotFound(t *testing.T) {
 	}
 }
 
+func TestRulingsResolveOracleIdentityAndTranslateOfficialComments(t *testing.T) {
+	id := "11111111-1111-4111-8111-111111111111"
+	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		switch r.URL.Path {
+		case "/cards/search":
+			if r.URL.Query().Get("q") != "oracleid:"+id {
+				t.Errorf("query=%s", r.URL.RawQuery)
+			}
+			return response(http.StatusOK, `{"data":[{"id":"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa","oracle_id":"`+id+`"}]}`), nil
+		case "/cards/aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa/rulings":
+			return response(http.StatusOK, `{"data":[{"published_at":"2021-03-19","comment":"Official clarification."},{"published_at":"2020-01-01","comment":"Earlier ruling."}]}`), nil
+		default:
+			t.Fatalf("unexpected request %s", r.URL)
+			return nil, nil
+		}
+	})}
+	result, err := scryfall.NewAdapterWithOptions("https://api.scryfall.test", client, scryfall.Options{}).GetRulings(context.Background(), card.OracleCardSelector{OracleID: id})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Rulings) != 2 || result.Rulings[0].PublishedAt != "2021-03-19" || result.Rulings[0].Comment != "Official clarification." {
+		t.Fatalf("rulings=%#v", result.Rulings)
+	}
+	if !strings.HasSuffix(result.SourceURL, "/cards/aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa/rulings") || result.FetchedAt.IsZero() || result.Stale {
+		t.Fatalf("provenance=%#v", result)
+	}
+}
+
 func TestPrintingLookupBySetAndCollectorTranslatesLocalizedFacesAndOptionalFields(t *testing.T) {
 	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
 		if r.URL.EscapedPath() != "/cards/neo/123a" {
