@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"log"
 	"regexp"
 	"strings"
 
@@ -42,10 +43,24 @@ func New(adapter card.Adapter) *mcp.Server {
 		}
 		result, err := adapter.GetOracleCard(ctx, card.OracleCardSelector{Name: input.Name, OracleID: input.OracleID})
 		if err != nil {
+			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+				return nil, err
+			}
 			if errors.Is(err, card.ErrNotFound) {
 				return toolError("not_found", "no Oracle card matched the exact selector"), nil
 			}
-			return nil, err
+			for expected, problem := range map[error][2]string{
+				card.ErrInvalidQuery:        {"invalid_query", "Scryfall rejected the query"},
+				card.ErrInvalidIdentifier:   {"invalid_identifier", "the card identifier is invalid"},
+				card.ErrRateLimited:         {"rate_limited", "the request could not be admitted within its time limit"},
+				card.ErrUpstreamUnavailable: {"upstream_unavailable", "Scryfall is temporarily unavailable"},
+			} {
+				if errors.Is(err, expected) {
+					return toolError(problem[0], problem[1]), nil
+				}
+			}
+			log.Printf("get_oracle_card failed: %v", err)
+			return toolError("internal_error", "an internal error occurred"), nil
 		}
 		result.FetchedAt = result.FetchedAt.UTC()
 		return &mcp.CallToolResult{StructuredContent: result}, nil
