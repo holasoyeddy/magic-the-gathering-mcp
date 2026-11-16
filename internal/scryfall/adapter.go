@@ -27,12 +27,18 @@ const (
 	classOther       endpointClass = "other"
 )
 
+// Options configures request pacing and retry bounds. Non-positive
+// RequestTimeout values use the package default; intervals and MaxRetries are
+// applied as provided so tests and callers can choose an explicit policy.
 type Options struct {
 	NamedInterval  time.Duration
 	OtherInterval  time.Duration
 	MaxRetries     int
 	RequestTimeout time.Duration
 }
+
+// Adapter translates live Scryfall responses into project-owned card facts.
+// It is safe for concurrent use and shares rate-limit reservations across calls.
 type Adapter struct {
 	baseURL       *url.URL
 	client        *http.Client
@@ -42,9 +48,15 @@ type Adapter struct {
 	maxRetries    int
 }
 
+// NewAdapter returns an Adapter with production pacing and retry defaults. A nil
+// client uses http.DefaultClient; the supplied client value is copied.
 func NewAdapter(baseURL string, client *http.Client) *Adapter {
 	return NewAdapterWithOptions(baseURL, client, Options{NamedInterval: 500 * time.Millisecond, OtherInterval: 100 * time.Millisecond, MaxRetries: 2})
 }
+
+// NewAdapterWithOptions returns an Adapter with explicit request policy. baseURL
+// must be a valid HTTPS origin. The client value is copied, and redirects outside
+// baseURL are rejected before card-fact request headers can be forwarded.
 func NewAdapterWithOptions(baseURL string, client *http.Client, options Options) *Adapter {
 	base, _ := url.Parse(strings.TrimRight(baseURL, "/"))
 	if client == nil {
@@ -96,6 +108,8 @@ type upstreamCard struct {
 	Legalities      map[string]string `json:"legalities"`
 }
 
+// SearchCards returns one source-ordered page for a native Scryfall query. It
+// honors cancellation and maps source failures to card sentinel errors.
 func (a *Adapter) SearchCards(ctx context.Context, request card.SearchRequest) (card.SearchResult, error) {
 	if a.baseURL == nil || a.baseURL.Scheme != "https" || a.baseURL.Host == "" {
 		return card.SearchResult{}, card.ErrUpstreamUnavailable
@@ -265,6 +279,7 @@ type upstreamPrinting struct {
 	CardFaces       []upstreamFace    `json:"card_faces"`
 }
 
+// GetOracleCard resolves one exact Oracle card and honors cancellation.
 func (a *Adapter) GetOracleCard(ctx context.Context, selector card.OracleCardSelector) (card.OracleCardResult, error) {
 	result, err := a.getExactCard(ctx, selector)
 	if err != nil {
@@ -273,6 +288,8 @@ func (a *Adapter) GetOracleCard(ctx context.Context, selector card.OracleCardSel
 	return card.OracleCardResult{Card: translate(result.card), SourceURL: result.sourceURL, FetchedAt: result.fetchedAt}, nil
 }
 
+// GetCardLegality resolves the owned format statuses for one exact Oracle card
+// and honors cancellation.
 func (a *Adapter) GetCardLegality(ctx context.Context, selector card.OracleCardSelector) (card.LegalityResult, error) {
 	result, err := a.getExactCard(ctx, selector)
 	if err != nil {
@@ -512,6 +529,7 @@ func (r *limiterRegistry) cancel(key limiterKey, target *limiterWaiter) {
 	}
 }
 
+// GetPrinting resolves one exact printing and honors cancellation.
 func (a *Adapter) GetPrinting(ctx context.Context, selector card.PrintingSelector) (card.PrintingResult, error) {
 	endpointURL := *a.baseURL
 	endpointURL.Path = strings.TrimRight(endpointURL.Path, "/") + "/cards/" + url.PathEscape(selector.ScryfallID)
@@ -576,6 +594,8 @@ func (a *Adapter) GetPrinting(ctx context.Context, selector card.PrintingSelecto
 	return card.PrintingResult{}, exhaustedError
 }
 
+// GetRulings resolves official rulings for one Oracle card and honors
+// cancellation. An Oracle card without rulings returns a successful empty result.
 func (a *Adapter) GetRulings(ctx context.Context, selector card.OracleCardSelector) (card.RulingsResult, error) {
 	if a.baseURL == nil || a.baseURL.Scheme != "https" || a.baseURL.Host == "" {
 		return card.RulingsResult{}, card.ErrUpstreamUnavailable

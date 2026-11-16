@@ -10,12 +10,17 @@ import (
 )
 
 const (
+	// CacheDirectoryEnvironment names the cache-directory setting.
 	CacheDirectoryEnvironment = "MTG_MCP_CACHE_DIR"
-	CacheMaxBytesEnvironment  = "MTG_MCP_CACHE_MAX_BYTES"
+	// CacheMaxBytesEnvironment names the positive cache-capacity setting in bytes.
+	CacheMaxBytesEnvironment = "MTG_MCP_CACHE_MAX_BYTES"
+	// CacheRetentionEnvironment names the stale-retention duration setting.
 	CacheRetentionEnvironment = "MTG_MCP_CACHE_RETENTION"
-	LogLevelEnvironment       = "MTG_MCP_LOG_LEVEL"
+	// LogLevelEnvironment names the debug, info, or error logging setting.
+	LogLevelEnvironment = "MTG_MCP_LOG_LEVEL"
 )
 
+// Config contains validated process configuration for card-fact service startup.
 type Config struct {
 	CacheDirectory string
 	CacheMaxBytes  int64
@@ -23,6 +28,8 @@ type Config struct {
 	LogLevel       string
 }
 
+// Load reads process configuration from the environment, applies documented
+// defaults, and rejects invalid capacity, retention, and log-level values.
 func Load() (Config, error) {
 	dir := strings.TrimSpace(os.Getenv(CacheDirectoryEnvironment))
 	if dir == "" {
