@@ -166,7 +166,7 @@ func TestReadCleanupFailuresAreDiagnostic(t *testing.T) {
 	if err := json.Unmarshal(original, &expiredRecord); err != nil {
 		t.Fatal(err)
 	}
-	expiredRecord.FetchedAt = now.Add(-retainFor - time.Second)
+	expiredRecord.FetchedAt = now.Add(-defaultRetainFor - time.Second)
 	expiredData, _ := json.Marshal(expiredRecord)
 	if err := os.WriteFile(path, expiredData, 0600); err != nil {
 		t.Fatal(err)
