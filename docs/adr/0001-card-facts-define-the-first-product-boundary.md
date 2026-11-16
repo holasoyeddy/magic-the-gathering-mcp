@@ -1,0 +1,3 @@
+# Card facts define the first product boundary
+
+The first release will serve any standards-compliant MCP client and expose authoritative card search, exact lookup, rulings, and format-legality capabilities. Printing-specific metadata and image links are card facts, but prices and purchase links are excluded because they require a separate market-data freshness promise. Deck intelligence—including deck-level aggregation, scoring, synergy judgments, substitutions, and strategic recommendations—is excluded because those results are derived advice rather than facts attributable to the upstream card-data source; Codex and Claude Desktop are compatibility targets, not privileged consumers.

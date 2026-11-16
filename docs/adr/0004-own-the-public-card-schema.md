@@ -1,0 +1,3 @@
+# Own the public card schema
+
+MCP tools will return curated server-owned representations of Oracle cards and printings, including upstream identifiers and source links, instead of exposing raw Scryfall JSON. This creates a stable public contract for all MCP clients and prevents upstream payload changes from leaking across the product boundary; card search returns Oracle cards by default and supports an explicit printing-result mode. Successful responses carry `source_url`, `fetched_at`, and `stale` provenance metadata, while expected failures use stable server-owned error codes rather than leaking upstream error shapes. Callers cannot bypass the server's cache policy.
