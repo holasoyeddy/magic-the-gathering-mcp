@@ -106,6 +106,45 @@ func TestSharedLimiterSpacesNamedRequests(t *testing.T) {
 	}
 }
 
+func TestLimiterUsesEndpointClassIntervals(t *testing.T) {
+	var mu sync.Mutex
+	times := map[string][]time.Time{"named": {}, "other": {}}
+	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		class := "other"
+		body := `{"id":"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa","name":"Print","lang":"en","set":"tst","collector_number":"1","finishes":[]}`
+		if r.URL.Path == "/cards/named" {
+			class = "named"
+			body = `{"name":"Oracle","layout":"normal","colors":[],"color_identity":[],"keywords":[]}`
+		}
+		mu.Lock()
+		times[class] = append(times[class], time.Now())
+		mu.Unlock()
+		return response(http.StatusOK, body), nil
+	})}
+	a := scryfall.NewAdapterWithOptions("https://classes.scryfall.test", client, scryfall.Options{NamedInterval: 60 * time.Millisecond, OtherInterval: 15 * time.Millisecond})
+	var wg sync.WaitGroup
+	wg.Add(4)
+	for _, name := range []string{"A", "B"} {
+		go func() {
+			defer wg.Done()
+			_, _ = a.GetOracleCard(context.Background(), card.OracleCardSelector{Name: name})
+		}()
+	}
+	for _, id := range []string{"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"} {
+		go func() {
+			defer wg.Done()
+			_, _ = a.GetPrinting(context.Background(), card.PrintingSelector{ScryfallID: id})
+		}()
+	}
+	wg.Wait()
+	if got := times["named"]; len(got) != 2 || got[1].Sub(got[0]) < 55*time.Millisecond {
+		t.Fatalf("named call times = %v", got)
+	}
+	if got := times["other"]; len(got) != 2 || got[1].Sub(got[0]) < 12*time.Millisecond || got[1].Sub(got[0]) >= 50*time.Millisecond {
+		t.Fatalf("other call times = %v", got)
+	}
+}
+
 func TestLimiterDeadlineReturnsRateLimited(t *testing.T) {
 	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
 		return response(http.StatusOK, `{"name":"Example","layout":"normal","colors":[],"color_identity":[],"keywords":[]}`), nil

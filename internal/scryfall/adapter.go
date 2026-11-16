@@ -20,18 +20,20 @@ const userAgent = "magic-the-gathering-mcp/0.1 (+https://github.com/holasoyeddy/
 
 type Options struct {
 	NamedInterval time.Duration
+	OtherInterval time.Duration
 	MaxRetries    int
 }
 type Adapter struct {
-	baseURL    *url.URL
-	client     *http.Client
-	now        func() time.Time
-	interval   time.Duration
-	maxRetries int
+	baseURL       *url.URL
+	client        *http.Client
+	now           func() time.Time
+	namedInterval time.Duration
+	otherInterval time.Duration
+	maxRetries    int
 }
 
 func NewAdapter(baseURL string, client *http.Client) *Adapter {
-	return NewAdapterWithOptions(baseURL, client, Options{NamedInterval: 500 * time.Millisecond, MaxRetries: 2})
+	return NewAdapterWithOptions(baseURL, client, Options{NamedInterval: 500 * time.Millisecond, OtherInterval: 100 * time.Millisecond, MaxRetries: 2})
 }
 func NewAdapterWithOptions(baseURL string, client *http.Client, options Options) *Adapter {
 	base, _ := url.Parse(strings.TrimRight(baseURL, "/"))
@@ -54,7 +56,7 @@ func NewAdapterWithOptions(baseURL string, client *http.Client, options Options)
 		}
 		return nil
 	}
-	return &Adapter{baseURL: base, client: &copyClient, now: time.Now, interval: options.NamedInterval, maxRetries: options.MaxRetries}
+	return &Adapter{baseURL: base, client: &copyClient, now: time.Now, namedInterval: options.NamedInterval, otherInterval: options.OtherInterval, maxRetries: options.MaxRetries}
 }
 
 type upstreamCard struct {
@@ -119,7 +121,7 @@ func (a *Adapter) GetOracleCard(ctx context.Context, selector card.OracleCardSel
 	}
 	var exhaustedError = card.ErrUpstreamUnavailable
 	for attempt := 0; attempt <= a.maxRetries; attempt++ {
-		if err := sharedLimiters.wait(ctx, a.baseURL.Host, a.interval); err != nil {
+		if err := sharedLimiters.wait(ctx, a.baseURL.Host+"|named-search", a.namedInterval); err != nil {
 			if errors.Is(err, context.Canceled) {
 				return card.OracleCardResult{}, err
 			}
@@ -245,7 +247,7 @@ func (a *Adapter) GetPrinting(ctx context.Context, selector card.PrintingSelecto
 	endpoint := endpointURL.String()
 	exhaustedError := card.ErrUpstreamUnavailable
 	for attempt := 0; attempt <= a.maxRetries; attempt++ {
-		if err := sharedLimiters.wait(ctx, a.baseURL.Host, a.interval); err != nil {
+		if err := sharedLimiters.wait(ctx, a.baseURL.Host+"|other", a.otherInterval); err != nil {
 			if errors.Is(err, context.Canceled) {
 				return card.PrintingResult{}, err
 			}
