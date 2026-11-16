@@ -26,6 +26,9 @@ func (a *cleanupAdapter) GetOracleCard(context.Context, card.OracleCardSelector)
 func (*cleanupAdapter) GetPrinting(context.Context, card.PrintingSelector) (card.PrintingResult, error) {
 	return card.PrintingResult{}, errors.New("unexpected")
 }
+func (*cleanupAdapter) GetRulings(context.Context, card.OracleCardSelector) (card.RulingsResult, error) {
+	return card.RulingsResult{}, errors.New("unexpected")
+}
 
 func TestStartupAndFreshHitsEnforceCapacity(t *testing.T) {
 	dir := t.TempDir()
