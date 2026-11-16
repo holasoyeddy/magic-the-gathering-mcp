@@ -23,6 +23,23 @@ type synchronizedAdapter struct {
 	release chan struct{}
 }
 
+type rulingsCacheAdapter struct {
+	result card.RulingsResult
+	err    error
+	calls  int
+}
+
+func (a *rulingsCacheAdapter) GetOracleCard(context.Context, card.OracleCardSelector) (card.OracleCardResult, error) {
+	return card.OracleCardResult{}, errors.New("unexpected")
+}
+func (a *rulingsCacheAdapter) GetPrinting(context.Context, card.PrintingSelector) (card.PrintingResult, error) {
+	return card.PrintingResult{}, errors.New("unexpected")
+}
+func (a *rulingsCacheAdapter) GetRulings(context.Context, card.OracleCardSelector) (card.RulingsResult, error) {
+	a.calls++
+	return a.result, a.err
+}
+
 func (a *synchronizedAdapter) GetOracleCard(ctx context.Context, _ card.OracleCardSelector) (card.OracleCardResult, error) {
 	a.mu.Lock()
 	a.calls++
@@ -42,6 +59,9 @@ func (a *synchronizedAdapter) GetOracleCard(ctx context.Context, _ card.OracleCa
 }
 func (a *synchronizedAdapter) GetPrinting(context.Context, card.PrintingSelector) (card.PrintingResult, error) {
 	return card.PrintingResult{}, errors.New("unexpected")
+}
+func (a *synchronizedAdapter) GetRulings(context.Context, card.OracleCardSelector) (card.RulingsResult, error) {
+	return card.RulingsResult{}, errors.New("unexpected")
 }
 func (a *synchronizedAdapter) count() int { a.mu.Lock(); defer a.mu.Unlock(); return a.calls }
 
@@ -117,5 +137,39 @@ func TestMCPConcurrentIdenticalMissesUseOneUpstreamAttempt(t *testing.T) {
 	}
 	if live.count() != 1 {
 		t.Fatalf("upstream calls=%d", live.count())
+	}
+}
+
+func TestMCPRulingsUseFreshCacheAndStaleFallback(t *testing.T) {
+	now := time.Date(2026, 11, 16, 12, 0, 0, 0, time.UTC)
+	live := &rulingsCacheAdapter{result: card.RulingsResult{Rulings: []card.Ruling{{PublishedAt: "2020-01-01", Comment: "Official."}}, SourceURL: "https://api.scryfall.com/cards/a/rulings", FetchedAt: now}}
+	cache, err := cardcache.New(live, cardcache.Options{Directory: t.TempDir(), Now: func() time.Time { return now }, MaxBytes: 1 << 20})
+	if err != nil {
+		t.Fatal(err)
+	}
+	session := connect(t, cache)
+	call := func() card.RulingsResult {
+		result, err := session.CallTool(context.Background(), &mcp.CallToolParams{Name: "get_rulings", Arguments: map[string]any{"name": "Example"}})
+		if err != nil || result.IsError {
+			t.Fatalf("result=%#v err=%v", result, err)
+		}
+		b, _ := json.Marshal(result.StructuredContent)
+		var got card.RulingsResult
+		if json.Unmarshal(b, &got) != nil {
+			t.Fatal("decode result")
+		}
+		return got
+	}
+	if got := call(); got.Stale || live.calls != 1 {
+		t.Fatalf("got=%#v calls=%d", got, live.calls)
+	}
+	now = now.Add(23 * time.Hour)
+	if got := call(); got.Stale || live.calls != 1 {
+		t.Fatalf("fresh got=%#v calls=%d", got, live.calls)
+	}
+	now = now.Add(2 * time.Hour)
+	live.err = card.ErrUpstreamUnavailable
+	if got := call(); !got.Stale || !got.FetchedAt.Equal(time.Date(2026, 11, 16, 12, 0, 0, 0, time.UTC)) || live.calls != 2 {
+		t.Fatalf("stale got=%#v calls=%d", got, live.calls)
 	}
 }
