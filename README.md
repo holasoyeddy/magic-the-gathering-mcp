@@ -39,7 +39,7 @@ to standard error, and produce no protocol output.
 | --- | --- | --- |
 | `MTG_MCP_CACHE_DIR` | OS per-user cache directory plus `magic-the-gathering-mcp` | Persistent cache directory; created with user-only permissions when absent. |
 | `MTG_MCP_CACHE_MAX_BYTES` | `268435456` (256 MiB) | Positive integer byte limit; least-recently-used records are evicted. |
-| `MTG_MCP_CACHE_RETENTION` | `720h` (30 days) | Go duration of at least `24h`; controls stale-record eligibility. |
+| `MTG_MCP_CACHE_RETENTION` | `720h` (30 days) | Go duration from `24h` through `720h`; controls stale-record eligibility. The hard stale ceiling is always 30 days. |
 | `MTG_MCP_LOG_LEVEL` | `info` | One of `debug`, `info`, or `error`. `error` suppresses nonfatal cache diagnostics. |
 
 Fresh cache records are reused for 24 hours. Records older than 24 hours but

@@ -117,6 +117,26 @@ func TestConfiguredRetentionControlsStaleFallback(t *testing.T) {
 	}
 }
 
+func TestConfiguredRetentionCannotExceedThirtyDayStaleCeiling(t *testing.T) {
+	dir := t.TempDir()
+	fetched := time.Date(2026, 10, 1, 12, 0, 0, 0, time.UTC)
+	selector := card.OracleCardSelector{Name: "Example"}
+	seed, err := cardcache.New(&fake{oracle: oracleResult(fetched)}, cardcache.Options{Directory: dir, Now: func() time.Time { return fetched }, RetainFor: 90 * 24 * time.Hour})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := seed.GetOracleCard(context.Background(), selector); err != nil {
+		t.Fatal(err)
+	}
+	offline, err := cardcache.New(&fake{oracleErr: card.ErrUpstreamUnavailable}, cardcache.Options{Directory: dir, Now: func() time.Time { return fetched.Add(31 * 24 * time.Hour) }, RetainFor: 90 * 24 * time.Hour})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := offline.GetOracleCard(context.Background(), selector); !errors.Is(err, card.ErrUpstreamUnavailable) {
+		t.Fatalf("error = %v, want hard-ceiling cache miss", err)
+	}
+}
+
 func TestConcurrentIdenticalMissesCoalesceAndDistinctMissesDoNot(t *testing.T) {
 	gate := make(chan struct{})
 	live := &fake{oracle: oracleResult(time.Now()), gate: gate}

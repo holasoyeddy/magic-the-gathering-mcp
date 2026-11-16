@@ -42,8 +42,8 @@ func Load() (Config, error) {
 	}
 	if raw := strings.TrimSpace(os.Getenv(CacheRetentionEnvironment)); raw != "" {
 		value, err := time.ParseDuration(raw)
-		if err != nil || value < 24*time.Hour {
-			return Config{}, fmt.Errorf("%s must be a Go duration of at least 24h, such as 720h", CacheRetentionEnvironment)
+		if err != nil || value < 24*time.Hour || value > 30*24*time.Hour {
+			return Config{}, fmt.Errorf("%s must be a Go duration from 24h through 720h", CacheRetentionEnvironment)
 		}
 		cfg.CacheRetention = value
 	}

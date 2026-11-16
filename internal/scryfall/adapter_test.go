@@ -173,6 +173,42 @@ func TestCancellationStopsLimiterWait(t *testing.T) {
 	}
 }
 
+func TestCanceledLimiterWaitDoesNotReserveAnExtraInterval(t *testing.T) {
+	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		return response(http.StatusOK, `{"name":"Example","layout":"normal","colors":[],"color_identity":[],"keywords":[]}`), nil
+	})}
+	interval := 80 * time.Millisecond
+	a := scryfall.NewAdapterWithOptions("https://reclaim.scryfall.test", client, scryfall.Options{NamedInterval: interval})
+	_, _ = a.GetOracleCard(context.Background(), card.OracleCardSelector{Name: "A"})
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { _, err := a.GetOracleCard(ctx, card.OracleCardSelector{Name: "B"}); done <- err }()
+	time.Sleep(10 * time.Millisecond)
+	cancel()
+	if err := <-done; !errors.Is(err, context.Canceled) {
+		t.Fatalf("error=%v", err)
+	}
+	started := time.Now()
+	if _, err := a.GetOracleCard(context.Background(), card.OracleCardSelector{Name: "C"}); err != nil {
+		t.Fatal(err)
+	}
+	if elapsed := time.Since(started); elapsed >= 130*time.Millisecond {
+		t.Fatalf("later request delayed by canceled reservation: %s", elapsed)
+	}
+}
+
+func TestHTTPAttemptIsBoundedWithoutCallerDeadline(t *testing.T) {
+	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		<-r.Context().Done()
+		return nil, r.Context().Err()
+	})}
+	started := time.Now()
+	_, err := scryfall.NewAdapterWithOptions("https://timeout.scryfall.test", client, scryfall.Options{RequestTimeout: 20 * time.Millisecond}).GetOracleCard(context.Background(), card.OracleCardSelector{Name: "Example"})
+	if !errors.Is(err, card.ErrUpstreamUnavailable) || time.Since(started) > 200*time.Millisecond {
+		t.Fatalf("error=%v elapsed=%s", err, time.Since(started))
+	}
+}
+
 func TestCrossHostRedirectIsRejectedBeforeHeadersAreForwarded(t *testing.T) {
 	forwarded := false
 	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
@@ -297,11 +333,11 @@ func TestSearchCardsTranslatesPaginationAndModes(t *testing.T) {
 			calls := 0
 			client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
 				calls++
-				if r.URL.Path != "/cards/search" || r.URL.Query().Get("q") != "t:goblin" || r.URL.Query().Get("unique") != tt.unique || r.URL.Query().Get("order") != "name" || r.URL.Query().Get("dir") != "auto" || r.URL.Query().Get("page") != fmt.Sprint(calls) {
+				if r.URL.Path != "/cards/search" || r.URL.Query().Get("q") != "t:goblin" || r.URL.Query().Get("unique") != tt.unique || r.URL.Query().Has("order") || r.URL.Query().Has("dir") || r.URL.Query().Get("page") != fmt.Sprint(calls) {
 					t.Errorf("request URL = %s", r.URL)
 				}
 				if calls == 1 {
-					return response(http.StatusOK, `{"has_more":true,"next_page":"https://search.scryfall.test/cards/search?q=t%3Agoblin&unique=`+tt.unique+`&order=name&dir=auto&page=2","data":[{"id":"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa","oracle_id":"11111111-1111-4111-8111-111111111111","name":"Goblin Guide","mana_cost":"{R}","cmc":1,"type_line":"Creature — Goblin Scout","set":"zen","collector_number":"126","lang":"en"}]}`), nil
+					return response(http.StatusOK, `{"has_more":true,"next_page":"https://search.scryfall.test/cards/search?q=t%3Agoblin&unique=`+tt.unique+`&page=2","data":[{"id":"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa","oracle_id":"11111111-1111-4111-8111-111111111111","name":"Goblin Guide","mana_cost":"{R}","cmc":1,"type_line":"Creature — Goblin Scout","set":"zen","collector_number":"126","lang":"en"}]}`), nil
 				}
 				return response(http.StatusOK, `{"has_more":false,"data":[]}`), nil
 			})}

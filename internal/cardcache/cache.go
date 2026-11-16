@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"sort"
 	"strings"
 	"sync"
@@ -22,6 +23,7 @@ const (
 	defaultMaxBytes      = int64(256 << 20)
 	freshFor             = 24 * time.Hour
 	defaultRetainFor     = 30 * 24 * time.Hour
+	maximumRetainFor     = 30 * 24 * time.Hour
 	DirectoryEnvironment = "MTG_MCP_CACHE_DIR"
 )
 
@@ -65,12 +67,22 @@ type flight struct {
 type entry struct {
 	SchemaVersion int             `json:"schema_version"`
 	Key           string          `json:"key"`
-	Operation     string          `json:"operation"`
+	Operation     operation       `json:"operation"`
 	FetchedAt     time.Time       `json:"fetched_at"`
 	LastAccess    time.Time       `json:"last_access"`
 	Payload       json.RawMessage `json:"payload"`
 	Integrity     string          `json:"integrity"`
 }
+
+type operation string
+
+const (
+	operationOracle   operation = "oracle-card"
+	operationPrinting operation = "printing"
+	operationLegality operation = "card-legality"
+	operationSearch   operation = "card-search"
+	operationRulings  operation = "rulings"
+)
 
 func DefaultDirectory() (string, error) {
 	if override := strings.TrimSpace(os.Getenv(DirectoryEnvironment)); override != "" {
@@ -110,6 +122,9 @@ func New(inner card.Adapter, options Options) (*Cache, error) {
 	if options.RetainFor < 1 {
 		return nil, errors.New("cache retention must be positive")
 	}
+	if options.RetainFor > maximumRetainFor {
+		options.RetainFor = maximumRetainFor
+	}
 	if options.Diagnostic == nil {
 		options.Diagnostic = func(string, ...any) {}
 	}
@@ -123,7 +138,7 @@ func New(inner card.Adapter, options Options) (*Cache, error) {
 
 func (c *Cache) GetOracleCard(ctx context.Context, selector card.OracleCardSelector) (card.OracleCardResult, error) {
 	key := oracleKey(selector)
-	value, err := c.get(ctx, "oracle-card", key, func() (any, error) { return c.inner.GetOracleCard(ctx, selector) })
+	value, err := c.get(ctx, operationOracle, key, func() (any, error) { return c.inner.GetOracleCard(ctx, selector) })
 	if err != nil {
 		return card.OracleCardResult{}, err
 	}
@@ -132,7 +147,7 @@ func (c *Cache) GetOracleCard(ctx context.Context, selector card.OracleCardSelec
 
 func (c *Cache) GetPrinting(ctx context.Context, selector card.PrintingSelector) (card.PrintingResult, error) {
 	key := printingKey(selector)
-	value, err := c.get(ctx, "printing", key, func() (any, error) { return c.inner.GetPrinting(ctx, selector) })
+	value, err := c.get(ctx, operationPrinting, key, func() (any, error) { return c.inner.GetPrinting(ctx, selector) })
 	if err != nil {
 		return card.PrintingResult{}, err
 	}
@@ -141,7 +156,7 @@ func (c *Cache) GetPrinting(ctx context.Context, selector card.PrintingSelector)
 
 func (c *Cache) GetCardLegality(ctx context.Context, selector card.OracleCardSelector) (card.LegalityResult, error) {
 	key := legalityKey(selector)
-	value, err := c.get(ctx, "card-legality", key, func() (any, error) { return c.inner.GetCardLegality(ctx, selector) })
+	value, err := c.get(ctx, operationLegality, key, func() (any, error) { return c.inner.GetCardLegality(ctx, selector) })
 	if err != nil {
 		return card.LegalityResult{}, err
 	}
@@ -154,7 +169,7 @@ func (c *Cache) SearchCards(ctx context.Context, request card.SearchRequest) (ca
 		return card.SearchResult{}, errors.New("adapter does not support card search")
 	}
 	key := searchKey(request)
-	value, err := c.get(ctx, "card-search", key, func() (any, error) { return searcher.SearchCards(ctx, request) })
+	value, err := c.get(ctx, operationSearch, key, func() (any, error) { return searcher.SearchCards(ctx, request) })
 	if err != nil {
 		return card.SearchResult{}, err
 	}
@@ -163,7 +178,7 @@ func (c *Cache) SearchCards(ctx context.Context, request card.SearchRequest) (ca
 
 func (c *Cache) GetRulings(ctx context.Context, selector card.OracleCardSelector) (card.RulingsResult, error) {
 	key := rulingsKey(selector)
-	value, err := c.get(ctx, "rulings", key, func() (any, error) { return c.inner.GetRulings(ctx, selector) })
+	value, err := c.get(ctx, operationRulings, key, func() (any, error) { return c.inner.GetRulings(ctx, selector) })
 	if err != nil {
 		return card.RulingsResult{}, err
 	}
@@ -209,7 +224,7 @@ func rulingsKey(s card.OracleCardSelector) string {
 	return "v1:rulings:exact-name:" + strings.ToLower(strings.TrimSpace(s.Name))
 }
 
-func (c *Cache) get(ctx context.Context, operation, key string, live func() (any, error)) (any, error) {
+func (c *Cache) get(ctx context.Context, operation operation, key string, live func() (any, error)) (any, error) {
 	if cached, age, ok := c.read(operation, key); ok && age <= freshFor {
 		c.cleanup()
 		return cached, nil
@@ -254,27 +269,13 @@ func (c *Cache) get(ctx context.Context, operation, key string, live func() (any
 }
 
 func markStale(value any) any {
-	switch result := value.(type) {
-	case card.OracleCardResult:
-		result.Stale = true
-		return result
-	case card.PrintingResult:
-		result.Stale = true
-		return result
-	case card.LegalityResult:
-		result.Stale = true
-		return result
-	case card.SearchResult:
-		result.Stale = true
-		return result
-	case card.RulingsResult:
-		result.Stale = true
-		return result
-	}
-	return value
+	copy := reflect.New(reflect.TypeOf(value))
+	copy.Elem().Set(reflect.ValueOf(value))
+	copy.Elem().FieldByName("Provenance").FieldByName("Stale").SetBool(true)
+	return copy.Elem().Interface()
 }
 
-func (c *Cache) read(operation, key string) (any, time.Duration, bool) {
+func (c *Cache) read(operation operation, key string) (any, time.Duration, bool) {
 	path := c.path(key)
 	data, err := c.fs.readFile(path)
 	if err != nil {
@@ -287,15 +288,15 @@ func (c *Cache) read(operation, key string) (any, time.Duration, bool) {
 	}
 	var value any
 	switch operation {
-	case "oracle-card":
+	case operationOracle:
 		value = &card.OracleCardResult{}
-	case "printing":
+	case operationPrinting:
 		value = &card.PrintingResult{}
-	case "card-legality":
+	case operationLegality:
 		value = &card.LegalityResult{}
-	case "card-search":
+	case operationSearch:
 		value = &card.SearchResult{}
-	case "rulings":
+	case operationRulings:
 		value = &card.RulingsResult{}
 	default:
 		return nil, 0, false
@@ -319,44 +320,17 @@ func (c *Cache) read(operation, key string) (any, time.Duration, bool) {
 			c.diagnostic("cache last-access update failed for %s: %v", path, err)
 		}
 	}
-	switch result := value.(type) {
-	case *card.OracleCardResult:
-		result.Stale = false
-		return *result, age, true
-	case *card.PrintingResult:
-		result.Stale = false
-		return *result, age, true
-	case *card.LegalityResult:
-		result.Stale = false
-		return *result, age, true
-	case *card.SearchResult:
-		result.Stale = false
-		return *result, age, true
-	case *card.RulingsResult:
-		result.Stale = false
-		return *result, age, true
-	}
-	return nil, 0, false
+	result := reflect.ValueOf(value).Elem()
+	result.FieldByName("Provenance").FieldByName("Stale").SetBool(false)
+	return result.Interface(), age, true
 }
 
-func (c *Cache) write(operation, key string, value any) error {
+func (c *Cache) write(operation operation, key string, value any) error {
 	payload, err := json.Marshal(value)
 	if err != nil {
 		return err
 	}
-	fetched := c.now().UTC()
-	switch result := value.(type) {
-	case card.OracleCardResult:
-		fetched = result.FetchedAt.UTC()
-	case card.PrintingResult:
-		fetched = result.FetchedAt.UTC()
-	case card.LegalityResult:
-		fetched = result.FetchedAt.UTC()
-	case card.SearchResult:
-		fetched = result.FetchedAt.UTC()
-	case card.RulingsResult:
-		fetched = result.FetchedAt.UTC()
-	}
+	fetched := reflect.ValueOf(value).FieldByName("Provenance").FieldByName("FetchedAt").Interface().(time.Time).UTC()
 	if fetched.IsZero() {
 		fetched = c.now().UTC()
 	}

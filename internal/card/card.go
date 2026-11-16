@@ -34,10 +34,16 @@ type OracleCard struct {
 }
 
 type OracleCardResult struct {
-	Card      OracleCard `json:"card"`
-	SourceURL string     `json:"source_url"`
-	FetchedAt time.Time  `json:"fetched_at"`
-	Stale     bool       `json:"stale"`
+	Card OracleCard `json:"card"`
+	Provenance
+}
+
+// Provenance describes the authoritative origin and freshness of a card fact.
+// It is embedded in result values so the public JSON schema remains flat.
+type Provenance struct {
+	SourceURL string    `json:"source_url"`
+	FetchedAt time.Time `json:"fetched_at"`
+	Stale     bool      `json:"stale"`
 }
 
 type PrintingSelector struct {
@@ -80,10 +86,8 @@ type Printing struct {
 }
 
 type PrintingResult struct {
-	Printing  Printing  `json:"printing"`
-	SourceURL string    `json:"source_url"`
-	FetchedAt time.Time `json:"fetched_at"`
-	Stale     bool      `json:"stale"`
+	Printing Printing `json:"printing"`
+	Provenance
 }
 
 type LegalityStatus string
@@ -102,10 +106,8 @@ type CardLegality struct {
 }
 
 type LegalityResult struct {
-	Legality  CardLegality `json:"legality"`
-	SourceURL string       `json:"source_url"`
-	FetchedAt time.Time    `json:"fetched_at"`
-	Stale     bool         `json:"stale"`
+	Legality CardLegality `json:"legality"`
+	Provenance
 }
 
 type SearchResultMode string
@@ -141,11 +143,9 @@ type SearchSummary struct {
 }
 
 type SearchResult struct {
-	Results   []SearchSummary     `json:"results"`
-	Next      *SearchContinuation `json:"next,omitempty"`
-	SourceURL string              `json:"source_url"`
-	FetchedAt time.Time           `json:"fetched_at"`
-	Stale     bool                `json:"stale"`
+	Results []SearchSummary     `json:"results"`
+	Next    *SearchContinuation `json:"next,omitempty"`
+	Provenance
 }
 
 type Searcher interface {
@@ -158,10 +158,8 @@ type Ruling struct {
 }
 
 type RulingsResult struct {
-	Rulings   []Ruling  `json:"rulings"`
-	SourceURL string    `json:"source_url"`
-	FetchedAt time.Time `json:"fetched_at"`
-	Stale     bool      `json:"stale"`
+	Rulings []Ruling `json:"rulings"`
+	Provenance
 }
 
 var ErrNotFound = errors.New("oracle card not found")
