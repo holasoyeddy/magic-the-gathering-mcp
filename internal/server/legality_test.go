@@ -30,7 +30,7 @@ func TestDiscoveryIncludesCardLegalityAfterExactLookupTools(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := []string{"get_oracle_card", "get_printing", "get_rulings", "get_card_legality"}
+	want := []string{"search_cards", "get_oracle_card", "get_printing", "get_rulings", "get_card_legality"}
 	if len(result.Tools) != len(want) {
 		t.Fatalf("tools = %#v", result.Tools)
 	}

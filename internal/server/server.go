@@ -2,12 +2,14 @@ package server
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"log"
 	"regexp"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/holasoyeddy/magic-the-gathering-mcp/internal/card"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
@@ -19,6 +21,67 @@ func New(adapter card.Adapter) *mcp.Server {
 		&mcp.ServerOptions{Capabilities: &mcp.ServerCapabilities{}},
 	)
 	server.AddReceivingMiddleware(specToolOrder)
+	server.AddTool(&mcp.Tool{
+		Name: "search_cards", Description: "Discover cards using native Scryfall query syntax.",
+		InputSchema: map[string]any{"type": "object", "additionalProperties": false, "required": []string{"query"}, "properties": map[string]any{
+			"query":       map[string]any{"type": "string"},
+			"result_mode": map[string]any{"type": "string", "enum": []string{"oracle_cards", "printings"}},
+			"page_size":   map[string]any{"type": "integer", "minimum": 1, "maximum": 100},
+			"cursor":      map[string]any{"type": "string"},
+		}},
+	}, func(ctx context.Context, request *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		var input struct {
+			Query      string `json:"query"`
+			ResultMode string `json:"result_mode"`
+			Cursor     string `json:"cursor"`
+			PageSize   *int   `json:"page_size"`
+		}
+		if err := json.Unmarshal(request.Params.Arguments, &input); err != nil {
+			return toolError("invalid_identifier", "provide a valid search request"), nil
+		}
+		input.Query = strings.TrimSpace(input.Query)
+		mode := card.SearchResultMode(strings.TrimSpace(input.ResultMode))
+		if mode == "" {
+			mode = card.SearchOracleCards
+		}
+		size := 20
+		if input.PageSize != nil {
+			size = *input.PageSize
+		}
+		if input.Query == "" || (mode != card.SearchOracleCards && mode != card.SearchPrintings) || size < 1 || size > 100 {
+			return toolError("invalid_identifier", "provide a query, valid result mode, and page size from 1 through 100"), nil
+		}
+		var continuation *card.SearchContinuation
+		if input.Cursor != "" {
+			decoded, err := decodeCursor(input.Cursor)
+			if err != nil || decoded.Version != 1 || decoded.Query != input.Query || decoded.Mode != mode || decoded.PageSize != size || decoded.Position == "" {
+				return toolError("invalid_identifier", "the search cursor is malformed, obsolete, or conflicts with this request"), nil
+			}
+			continuation = &card.SearchContinuation{Position: decoded.Position}
+		}
+		searcher, ok := adapter.(card.Searcher)
+		if !ok {
+			return toolError("internal_error", "search is unavailable"), nil
+		}
+		result, err := searcher.SearchCards(ctx, card.SearchRequest{Query: input.Query, ResultMode: mode, PageSize: size, Continuation: continuation})
+		if err != nil {
+			return exactLookupError("search_cards", "", err)
+		}
+		public := struct {
+			Results    []card.SearchSummary `json:"results"`
+			NextCursor string               `json:"next_cursor,omitempty"`
+			SourceURL  string               `json:"source_url"`
+			FetchedAt  time.Time            `json:"fetched_at"`
+			Stale      bool                 `json:"stale"`
+		}{Results: result.Results, SourceURL: result.SourceURL, FetchedAt: result.FetchedAt.UTC(), Stale: result.Stale}
+		if public.Results == nil {
+			public.Results = []card.SearchSummary{}
+		}
+		if result.Next != nil {
+			public.NextCursor = encodeCursor(searchCursor{Version: 1, Query: input.Query, Mode: mode, PageSize: size, Position: result.Next.Position})
+		}
+		return &mcp.CallToolResult{StructuredContent: public}, nil
+	})
 	server.AddTool(&mcp.Tool{
 		Name:        "get_oracle_card",
 		Description: "Resolve an Oracle card by exact name or Oracle ID.",
@@ -181,6 +244,27 @@ func specToolOrder(next mcp.MethodHandler) mcp.MethodHandler {
 		})
 		return listed, nil
 	}
+}
+
+type searchCursor struct {
+	Version  int                   `json:"v"`
+	Query    string                `json:"q"`
+	Mode     card.SearchResultMode `json:"m"`
+	PageSize int                   `json:"s"`
+	Position string                `json:"p"`
+}
+
+func encodeCursor(cursor searchCursor) string {
+	b, _ := json.Marshal(cursor)
+	return base64.RawURLEncoding.EncodeToString(b)
+}
+func decodeCursor(value string) (searchCursor, error) {
+	var cursor searchCursor
+	b, err := base64.RawURLEncoding.DecodeString(value)
+	if err == nil {
+		err = json.Unmarshal(b, &cursor)
+	}
+	return cursor, err
 }
 
 func exactLookupError(operation, notFoundMessage string, err error) (*mcp.CallToolResult, error) {
