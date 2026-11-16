@@ -147,7 +147,7 @@ func (a *Adapter) SearchCards(ctx context.Context, request card.SearchRequest) (
 		}
 		if response.StatusCode == http.StatusTooManyRequests || response.StatusCode >= 500 {
 			retryAfter := parseRetryAfter(response.Header.Get("Retry-After"), a.now())
-			response.Body.Close()
+			_ = response.Body.Close()
 			if response.StatusCode == http.StatusTooManyRequests {
 				exhausted = card.ErrRateLimited
 			}
@@ -163,18 +163,18 @@ func (a *Adapter) SearchCards(ctx context.Context, request card.SearchRequest) (
 			continue
 		}
 		if response.StatusCode == http.StatusBadRequest {
-			io.Copy(io.Discard, response.Body)
-			response.Body.Close()
+			_, _ = io.Copy(io.Discard, response.Body)
+			_ = response.Body.Close()
 			return card.SearchResult{}, card.ErrInvalidQuery
 		}
 		if response.StatusCode == http.StatusNotFound {
-			io.Copy(io.Discard, response.Body)
-			response.Body.Close()
+			_, _ = io.Copy(io.Discard, response.Body)
+			_ = response.Body.Close()
 			return card.SearchResult{Results: []card.SearchSummary{}, SourceURL: endpoint.String(), FetchedAt: a.now().UTC()}, nil
 		}
 		if response.StatusCode < 200 || response.StatusCode >= 300 {
-			io.Copy(io.Discard, response.Body)
-			response.Body.Close()
+			_, _ = io.Copy(io.Discard, response.Body)
+			_ = response.Body.Close()
 			return card.SearchResult{}, card.ErrUpstreamUnavailable
 		}
 		var page struct {
@@ -183,7 +183,7 @@ func (a *Adapter) SearchCards(ctx context.Context, request card.SearchRequest) (
 			NextPage string         `json:"next_page"`
 		}
 		err = json.NewDecoder(response.Body).Decode(&page)
-		response.Body.Close()
+		_ = response.Body.Close()
 		if err != nil {
 			return card.SearchResult{}, fmt.Errorf("decode Scryfall search response: %w", err)
 		}
@@ -320,7 +320,7 @@ func (a *Adapter) getExactCard(ctx context.Context, selector card.OracleCardSele
 		}
 		req.Header.Set("Accept", "application/json")
 		req.Header.Set("User-Agent", userAgent)
-		response, err := a.client.Do(req)
+		response, err := a.client.Do(req) //nolint:bodyclose // consumeExactCard owns and closes the response body.
 		if err != nil {
 			if ctx.Err() != nil {
 				return exactCardResult{}, ctx.Err()
@@ -351,21 +351,21 @@ func (a *Adapter) getExactCard(ctx context.Context, selector card.OracleCardSele
 }
 
 func (a *Adapter) consumeExactCard(response *http.Response, isSearch bool) (upstreamCard, bool, time.Duration, error) {
-	defer response.Body.Close()
+	defer func() { _ = response.Body.Close() }()
 	if response.StatusCode == http.StatusNotFound {
-		io.Copy(io.Discard, response.Body)
+		_, _ = io.Copy(io.Discard, response.Body)
 		return upstreamCard{}, false, 0, card.ErrNotFound
 	}
 	if response.StatusCode == http.StatusTooManyRequests {
-		io.Copy(io.Discard, response.Body)
+		_, _ = io.Copy(io.Discard, response.Body)
 		return upstreamCard{}, true, parseRetryAfter(response.Header.Get("Retry-After"), a.now()), card.ErrRateLimited
 	}
 	if response.StatusCode >= 500 {
-		io.Copy(io.Discard, response.Body)
+		_, _ = io.Copy(io.Discard, response.Body)
 		return upstreamCard{}, true, 0, card.ErrUpstreamUnavailable
 	}
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
-		io.Copy(io.Discard, response.Body)
+		_, _ = io.Copy(io.Discard, response.Body)
 		return upstreamCard{}, false, 0, card.ErrInvalidIdentifier
 	}
 	var raw upstreamCard
@@ -541,12 +541,12 @@ func (a *Adapter) GetPrinting(ctx context.Context, selector card.PrintingSelecto
 			continue
 		}
 		if response.StatusCode == http.StatusNotFound {
-			response.Body.Close()
+			_ = response.Body.Close()
 			return card.PrintingResult{}, card.ErrNotFound
 		}
 		if response.StatusCode == http.StatusTooManyRequests || response.StatusCode >= 500 {
 			retryAfter := parseRetryAfter(response.Header.Get("Retry-After"), a.now())
-			response.Body.Close()
+			_ = response.Body.Close()
 			if response.StatusCode == http.StatusTooManyRequests {
 				exhaustedError = card.ErrRateLimited
 			}
@@ -562,12 +562,12 @@ func (a *Adapter) GetPrinting(ctx context.Context, selector card.PrintingSelecto
 			continue
 		}
 		if response.StatusCode < 200 || response.StatusCode >= 300 {
-			response.Body.Close()
+			_ = response.Body.Close()
 			return card.PrintingResult{}, card.ErrInvalidIdentifier
 		}
 		var raw upstreamPrinting
 		decodeErr := json.NewDecoder(response.Body).Decode(&raw)
-		response.Body.Close()
+		_ = response.Body.Close()
 		if decodeErr != nil {
 			return card.PrintingResult{}, fmt.Errorf("decode Scryfall response: %w", decodeErr)
 		}
@@ -645,12 +645,12 @@ func (a *Adapter) getJSON(ctx context.Context, endpoint string, class endpointCl
 			continue
 		}
 		if response.StatusCode == http.StatusNotFound {
-			response.Body.Close()
+			_ = response.Body.Close()
 			return card.ErrNotFound
 		}
 		if response.StatusCode == http.StatusTooManyRequests || response.StatusCode >= 500 {
 			retryAfter := parseRetryAfter(response.Header.Get("Retry-After"), a.now())
-			response.Body.Close()
+			_ = response.Body.Close()
 			if response.StatusCode == http.StatusTooManyRequests {
 				exhausted = card.ErrRateLimited
 			}
@@ -666,11 +666,11 @@ func (a *Adapter) getJSON(ctx context.Context, endpoint string, class endpointCl
 			continue
 		}
 		if response.StatusCode < 200 || response.StatusCode >= 300 {
-			response.Body.Close()
+			_ = response.Body.Close()
 			return card.ErrInvalidIdentifier
 		}
 		err = json.NewDecoder(response.Body).Decode(target)
-		response.Body.Close()
+		_ = response.Body.Close()
 		if err != nil {
 			return fmt.Errorf("decode Scryfall response: %w", err)
 		}

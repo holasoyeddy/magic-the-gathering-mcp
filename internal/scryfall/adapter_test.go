@@ -395,7 +395,7 @@ func TestSearchCardsBoundsPagesWithoutSkippingUpstreamResults(t *testing.T) {
 func TestScryfallNotFoundIsDomainNotFound(t *testing.T) {
 	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) { return response(http.StatusNotFound, `{}`), nil })}
 	_, err := scryfall.NewAdapter("https://api.scryfall.test", client).GetOracleCard(context.Background(), card.OracleCardSelector{Name: "Missing"})
-	if err != card.ErrNotFound {
+	if !errors.Is(err, card.ErrNotFound) {
 		t.Fatalf("error = %v", err)
 	}
 }

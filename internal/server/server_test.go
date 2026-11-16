@@ -151,13 +151,13 @@ func connect(t *testing.T, adapter card.Adapter) *mcp.ClientSession {
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { serverSession.Close() })
+	t.Cleanup(func() { _ = serverSession.Close() })
 	client := mcp.NewClient(&mcp.Implementation{Name: "contract-test", Version: "v0.0.1"}, nil)
 	clientSession, err := client.Connect(ctx, clientTransport, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { clientSession.Close() })
+	t.Cleanup(func() { _ = clientSession.Close() })
 	return clientSession
 }
 

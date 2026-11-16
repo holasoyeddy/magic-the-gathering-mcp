@@ -53,7 +53,7 @@ func TestBuiltExecutableNegotiatesListsCallsAndExitsOnEOF(t *testing.T) {
 
 func TestInvalidStartupConfigurationUsesStderrOnly(t *testing.T) {
 	binary := buildExecutable(t)
-	cmd := exec.Command(binary)
+	cmd := exec.CommandContext(t.Context(), binary)
 	cmd.Env = append(os.Environ(), "MTG_MCP_CACHE_MAX_BYTES=invalid")
 	stdout, stderr := bytes.Buffer{}, bytes.Buffer{}
 	cmd.Stdout, cmd.Stderr = &stdout, &stderr
@@ -68,7 +68,7 @@ func TestInvalidStartupConfigurationUsesStderrOnly(t *testing.T) {
 func buildExecutable(t *testing.T) string {
 	t.Helper()
 	binary := filepath.Join(t.TempDir(), "magic-the-gathering-mcp")
-	cmd := exec.Command("go", "build", "-o", binary, ".")
+	cmd := exec.CommandContext(t.Context(), "go", "build", "-o", binary, ".")
 	cmd.Env = append(os.Environ(), "GOCACHE="+filepath.Join(t.TempDir(), "go-build"))
 	if output, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("build executable: %v\n%s", err, output)

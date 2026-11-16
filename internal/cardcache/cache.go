@@ -374,7 +374,7 @@ func atomicWrite(path string, data []byte) error {
 		return err
 	}
 	name := temp.Name()
-	defer os.Remove(name)
+	defer func() { _ = os.Remove(name) }()
 	if err = temp.Chmod(0600); err == nil {
 		_, err = temp.Write(data)
 	}
@@ -404,14 +404,14 @@ func (c *Cache) evict() error {
 		info, e := c.fs.stat(path)
 		if e != nil {
 			if removeErr := c.fs.remove(path); removeErr != nil {
-				return fmt.Errorf("account for unreadable cache entry %s: stat: %v; remove: %w", path, e, removeErr)
+				return fmt.Errorf("account for unreadable cache entry %s: %w", path, errors.Join(e, fmt.Errorf("remove: %w", removeErr)))
 			}
 			continue
 		}
 		data, e := c.fs.readFile(path)
 		if e != nil {
 			if removeErr := c.fs.remove(path); removeErr != nil {
-				return fmt.Errorf("account for unreadable cache entry %s (%d bytes): read: %v; remove: %w", path, info.Size(), e, removeErr)
+				return fmt.Errorf("account for unreadable cache entry %s (%d bytes): %w", path, info.Size(), errors.Join(e, fmt.Errorf("remove: %w", removeErr)))
 			}
 			continue
 		}
