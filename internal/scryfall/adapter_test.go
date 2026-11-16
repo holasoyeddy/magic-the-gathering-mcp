@@ -278,6 +278,19 @@ func TestSearchCardsRejectsInvalidQueryWithoutBody(t *testing.T) {
 	}
 }
 
+func TestSearchCardsTreatsNotFoundAsSuccessfulEmptyPage(t *testing.T) {
+	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		return response(http.StatusNotFound, `{"details":"Your query didn't match any cards"}`), nil
+	})}
+	result, err := scryfall.NewAdapterWithOptions("https://empty.scryfall.test", client, scryfall.Options{}).SearchCards(context.Background(), card.SearchRequest{Query: "name:does-not-exist", ResultMode: card.SearchOracleCards, PageSize: 20})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Results == nil || len(result.Results) != 0 || result.Next != nil || result.SourceURL == "" || result.FetchedAt.IsZero() || result.Stale {
+		t.Fatalf("result=%#v", result)
+	}
+}
+
 func TestSearchCardsBoundsPagesWithoutSkippingUpstreamResults(t *testing.T) {
 	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
 		return response(http.StatusOK, `{"has_more":false,"data":[{"name":"One"},{"name":"Two"},{"name":"Three"}]}`), nil

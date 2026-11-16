@@ -25,3 +25,5 @@ Implemented `search_cards` as a deterministic MCP tool backed by the card-data a
 
 Contract tests cover discovery, defaults, both modes, page bounds, empty pages, invalid queries, continuation and cursor conflicts, compact output, and stale fallback. Narrow adapter tests cover mode-specific upstream requests, pagination, bounded continuation, and invalid-query translation.
 
+Scryfall's HTTP 404 no-match response is translated into the same successful empty page, including source and fetch-time provenance; adapter and MCP contract tests exercise that concrete upstream path.
+

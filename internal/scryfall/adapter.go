@@ -149,6 +149,11 @@ func (a *Adapter) SearchCards(ctx context.Context, request card.SearchRequest) (
 			response.Body.Close()
 			return card.SearchResult{}, card.ErrInvalidQuery
 		}
+		if response.StatusCode == http.StatusNotFound {
+			io.Copy(io.Discard, response.Body)
+			response.Body.Close()
+			return card.SearchResult{Results: []card.SearchSummary{}, SourceURL: endpoint.String(), FetchedAt: a.now().UTC()}, nil
+		}
 		if response.StatusCode < 200 || response.StatusCode >= 300 {
 			io.Copy(io.Discard, response.Body)
 			response.Body.Close()

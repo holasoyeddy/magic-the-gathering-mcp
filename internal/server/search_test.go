@@ -4,12 +4,15 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
+	"net/http"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/holasoyeddy/magic-the-gathering-mcp/internal/card"
 	"github.com/holasoyeddy/magic-the-gathering-mcp/internal/cardcache"
+	"github.com/holasoyeddy/magic-the-gathering-mcp/internal/scryfall"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
@@ -18,6 +21,12 @@ type searchFake struct {
 	result card.SearchResult
 	err    error
 	calls  []card.SearchRequest
+}
+
+type searchRoundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f searchRoundTripFunc) RoundTrip(request *http.Request) (*http.Response, error) {
+	return f(request)
 }
 
 func (f *searchFake) SearchCards(_ context.Context, request card.SearchRequest) (card.SearchResult, error) {
@@ -140,5 +149,24 @@ func TestSearchCardsUsesFreshCacheAndStaleFallback(t *testing.T) {
 	got := call()
 	if !got.Stale || got.FetchedAt != live.result.FetchedAt || len(live.calls) != 2 {
 		t.Fatalf("stale=%#v calls=%d", got, len(live.calls))
+	}
+}
+
+func TestSearchCardsReturnsSuccessfulEmptyPageForScryfallNotFound(t *testing.T) {
+	client := &http.Client{Transport: searchRoundTripFunc(func(*http.Request) (*http.Response, error) {
+		return &http.Response{StatusCode: http.StatusNotFound, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(`private no-match body`))}, nil
+	})}
+	adapter := scryfall.NewAdapterWithOptions("https://empty-contract.scryfall.test", client, scryfall.Options{})
+	result, err := connect(t, adapter).CallTool(context.Background(), &mcp.CallToolParams{Name: "search_cards", Arguments: map[string]any{"query": "name:does-not-exist"}})
+	if err != nil || result.IsError {
+		t.Fatalf("result=%#v err=%v", result, err)
+	}
+	b, _ := json.Marshal(result.StructuredContent)
+	var got card.SearchResult
+	if err := json.Unmarshal(b, &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.Results == nil || len(got.Results) != 0 || got.SourceURL == "" || got.FetchedAt.IsZero() || strings.Contains(string(b), "private") {
+		t.Fatalf("result=%s", b)
 	}
 }
