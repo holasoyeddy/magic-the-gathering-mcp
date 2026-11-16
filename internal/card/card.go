@@ -40,8 +40,55 @@ type OracleCardResult struct {
 	Stale     bool       `json:"stale"`
 }
 
+type PrintingSelector struct {
+	ScryfallID      string
+	SetCode         string
+	CollectorNumber string
+}
+
+type PrintingFace struct {
+	Name        string            `json:"name"`
+	PrintedName *string           `json:"printed_name,omitempty"`
+	ManaCost    *string           `json:"mana_cost,omitempty"`
+	TypeLine    *string           `json:"type_line,omitempty"`
+	PrintedText *string           `json:"printed_text,omitempty"`
+	ImageURLs   map[string]string `json:"image_urls,omitempty"`
+}
+
+type Printing struct {
+	ScryfallID      string            `json:"scryfall_id"`
+	OracleID        *string           `json:"oracle_id,omitempty"`
+	Name            string            `json:"name"`
+	Language        string            `json:"language"`
+	PrintedName     *string           `json:"printed_name,omitempty"`
+	PrintedTypeLine *string           `json:"printed_type_line,omitempty"`
+	PrintedText     *string           `json:"printed_text,omitempty"`
+	SetCode         string            `json:"set_code"`
+	SetName         string            `json:"set_name"`
+	CollectorNumber string            `json:"collector_number"`
+	Rarity          string            `json:"rarity"`
+	ReleasedAt      string            `json:"released_at"`
+	Artist          *string           `json:"artist,omitempty"`
+	Finishes        []string          `json:"finishes"`
+	Frame           string            `json:"frame"`
+	FrameEffects    []string          `json:"frame_effects,omitempty"`
+	BorderColor     string            `json:"border_color"`
+	FullArt         bool              `json:"full_art"`
+	Textless        bool              `json:"textless"`
+	ImageURLs       map[string]string `json:"image_urls,omitempty"`
+	Faces           []PrintingFace    `json:"faces"`
+}
+
+type PrintingResult struct {
+	Printing  Printing  `json:"printing"`
+	SourceURL string    `json:"source_url"`
+	FetchedAt time.Time `json:"fetched_at"`
+	Stale     bool      `json:"stale"`
+}
+
 var ErrNotFound = errors.New("oracle card not found")
 
 type Adapter interface {
 	GetOracleCard(context.Context, OracleCardSelector) (OracleCardResult, error)
+	GetPrinting(context.Context, PrintingSelector) (PrintingResult, error)
 }
