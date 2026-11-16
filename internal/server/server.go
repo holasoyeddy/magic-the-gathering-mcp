@@ -15,6 +15,9 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
+// New constructs the MCP server and registers its card-fact tools in stable
+// discovery order. The adapter is shared by concurrent tool calls and therefore
+// must satisfy the concurrency and cancellation contract of card.Adapter.
 func New(adapter card.Adapter) *mcp.Server {
 	server := mcp.NewServer(
 		&mcp.Implementation{Name: "magic-the-gathering-mcp", Version: "v0.1.0"},

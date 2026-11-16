@@ -19,14 +19,18 @@ import (
 )
 
 const (
-	schemaVersion        = 1
-	defaultMaxBytes      = int64(256 << 20)
-	freshFor             = 24 * time.Hour
-	defaultRetainFor     = 30 * 24 * time.Hour
-	maximumRetainFor     = 30 * 24 * time.Hour
+	schemaVersion    = 1
+	defaultMaxBytes  = int64(256 << 20)
+	freshFor         = 24 * time.Hour
+	defaultRetainFor = 30 * 24 * time.Hour
+	maximumRetainFor = 30 * 24 * time.Hour
+	// DirectoryEnvironment names the optional cache-directory override.
 	DirectoryEnvironment = "MTG_MCP_CACHE_DIR"
 )
 
+// Options configures persistent card-fact caching. Zero values select the
+// documented defaults. RetainFor is capped at 30 days, and Diagnostic receives
+// best-effort maintenance errors that do not prevent a card-fact response.
 type Options struct {
 	Directory  string
 	Now        func() time.Time
@@ -35,6 +39,9 @@ type Options struct {
 	Diagnostic func(string, ...any)
 }
 
+// Cache is a concurrency-safe, persistent card-fact adapter. It coalesces
+// identical live requests and may return an explicitly stale result when a
+// refresh is rate limited or unavailable within the configured retention window.
 type Cache struct {
 	inner      card.Adapter
 	dir        string
@@ -84,6 +91,8 @@ const (
 	operationRulings  operation = "rulings"
 )
 
+// DefaultDirectory returns the configured cache directory, or an application
+// directory beneath the current user's cache directory when no override exists.
 func DefaultDirectory() (string, error) {
 	if override := strings.TrimSpace(os.Getenv(DirectoryEnvironment)); override != "" {
 		return override, nil
@@ -95,6 +104,9 @@ func DefaultDirectory() (string, error) {
 	return filepath.Join(base, "magic-the-gathering-mcp"), nil
 }
 
+// New creates a persistent Cache around inner and performs best-effort startup
+// maintenance. It creates the cache directory and returns an error when the
+// configuration or required directory setup is invalid.
 func New(inner card.Adapter, options Options) (*Cache, error) {
 	if inner == nil {
 		return nil, errors.New("cache requires an adapter")
@@ -136,6 +148,8 @@ func New(inner card.Adapter, options Options) (*Cache, error) {
 	return c, nil
 }
 
+// GetOracleCard returns an exact Oracle-card fact, reusing a fresh cached result
+// or an eligible stale result when the live adapter is unavailable.
 func (c *Cache) GetOracleCard(ctx context.Context, selector card.OracleCardSelector) (card.OracleCardResult, error) {
 	key := oracleKey(selector)
 	value, err := c.get(ctx, operationOracle, key, func() (any, error) { return c.inner.GetOracleCard(ctx, selector) })
@@ -145,6 +159,7 @@ func (c *Cache) GetOracleCard(ctx context.Context, selector card.OracleCardSelec
 	return value.(card.OracleCardResult), nil
 }
 
+// GetPrinting returns an exact printing fact under the cache freshness policy.
 func (c *Cache) GetPrinting(ctx context.Context, selector card.PrintingSelector) (card.PrintingResult, error) {
 	key := printingKey(selector)
 	value, err := c.get(ctx, operationPrinting, key, func() (any, error) { return c.inner.GetPrinting(ctx, selector) })
@@ -154,6 +169,7 @@ func (c *Cache) GetPrinting(ctx context.Context, selector card.PrintingSelector)
 	return value.(card.PrintingResult), nil
 }
 
+// GetCardLegality returns card legality under the cache freshness policy.
 func (c *Cache) GetCardLegality(ctx context.Context, selector card.OracleCardSelector) (card.LegalityResult, error) {
 	key := legalityKey(selector)
 	value, err := c.get(ctx, operationLegality, key, func() (any, error) { return c.inner.GetCardLegality(ctx, selector) })
@@ -163,6 +179,8 @@ func (c *Cache) GetCardLegality(ctx context.Context, selector card.OracleCardSel
 	return value.(card.LegalityResult), nil
 }
 
+// SearchCards returns an ordered page of card-search results under the cache
+// freshness policy. It fails when the wrapped adapter cannot search.
 func (c *Cache) SearchCards(ctx context.Context, request card.SearchRequest) (card.SearchResult, error) {
 	searcher, ok := c.inner.(card.Searcher)
 	if !ok {
@@ -176,6 +194,7 @@ func (c *Cache) SearchCards(ctx context.Context, request card.SearchRequest) (ca
 	return value.(card.SearchResult), nil
 }
 
+// GetRulings returns rulings for an Oracle card under the cache freshness policy.
 func (c *Cache) GetRulings(ctx context.Context, selector card.OracleCardSelector) (card.RulingsResult, error) {
 	key := rulingsKey(selector)
 	value, err := c.get(ctx, operationRulings, key, func() (any, error) { return c.inner.GetRulings(ctx, selector) })
