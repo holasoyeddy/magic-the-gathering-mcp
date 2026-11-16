@@ -49,6 +49,7 @@ func TestLoadRejectsInvalidEnvironment(t *testing.T) {
 		{"MTG_MCP_CACHE_RETENTION", "0s"},
 		{"MTG_MCP_CACHE_RETENTION", "1h"},
 		{"MTG_MCP_CACHE_RETENTION", "forever"},
+		{"MTG_MCP_CACHE_RETENTION", "721h"},
 		{"MTG_MCP_LOG_LEVEL", "verbose"},
 	}
 	for _, tt := range tests {

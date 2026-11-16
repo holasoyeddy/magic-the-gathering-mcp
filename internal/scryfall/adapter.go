@@ -18,10 +18,20 @@ import (
 
 const userAgent = "magic-the-gathering-mcp/0.1 (+https://github.com/holasoyeddy/magic-the-gathering-mcp)"
 
+const defaultRequestTimeout = 10 * time.Second
+
+type endpointClass string
+
+const (
+	classNamedSearch endpointClass = "named-search"
+	classOther       endpointClass = "other"
+)
+
 type Options struct {
-	NamedInterval time.Duration
-	OtherInterval time.Duration
-	MaxRetries    int
+	NamedInterval  time.Duration
+	OtherInterval  time.Duration
+	MaxRetries     int
+	RequestTimeout time.Duration
 }
 type Adapter struct {
 	baseURL       *url.URL
@@ -41,6 +51,13 @@ func NewAdapterWithOptions(baseURL string, client *http.Client, options Options)
 		client = http.DefaultClient
 	}
 	copyClient := *client
+	requestTimeout := options.RequestTimeout
+	if requestTimeout <= 0 {
+		requestTimeout = defaultRequestTimeout
+	}
+	if copyClient.Timeout <= 0 {
+		copyClient.Timeout = requestTimeout
+	}
 	originalRedirect := copyClient.CheckRedirect
 	copyClient.CheckRedirect = func(req *http.Request, via []*http.Request) error {
 		if base == nil || !sameDestination(req.URL, base) {
@@ -89,7 +106,7 @@ func (a *Adapter) SearchCards(ctx context.Context, request card.SearchRequest) (
 	}
 	endpoint := *a.baseURL
 	endpoint.Path = strings.TrimRight(endpoint.Path, "/") + "/cards/search"
-	endpoint.RawQuery = url.Values{"q": {request.Query}, "unique": {unique}, "order": {"name"}, "dir": {"auto"}, "page": {"1"}}.Encode()
+	endpoint.RawQuery = url.Values{"q": {request.Query}, "unique": {unique}, "page": {"1"}}.Encode()
 	offset := 0
 	if request.Continuation != nil {
 		position := request.Continuation.Position
@@ -102,14 +119,14 @@ func (a *Adapter) SearchCards(ctx context.Context, request card.SearchRequest) (
 			position = position[:separator]
 		}
 		next, err := url.Parse(position)
-		if err != nil || !sameDestination(next, a.baseURL) || next.Path != endpoint.Path || next.Query().Get("q") != request.Query || next.Query().Get("unique") != unique || next.Query().Get("order") != "name" || next.Query().Get("dir") != "auto" || next.Query().Get("page") == "" {
+		if err != nil || !sameDestination(next, a.baseURL) || next.Path != endpoint.Path || next.Query().Get("q") != request.Query || next.Query().Get("unique") != unique || next.Query().Get("page") == "" {
 			return card.SearchResult{}, card.ErrInvalidIdentifier
 		}
 		endpoint = *next
 	}
 	exhausted := error(card.ErrUpstreamUnavailable)
 	for attempt := 0; attempt <= a.maxRetries; attempt++ {
-		if err := sharedLimiters.wait(ctx, a.baseURL.Host+"|named-search", a.namedInterval); err != nil {
+		if err := sharedLimiters.wait(ctx, a.baseURL.Host, classNamedSearch, a.namedInterval); err != nil {
 			if errors.Is(err, context.Canceled) {
 				return card.SearchResult{}, err
 			}
@@ -291,7 +308,7 @@ func (a *Adapter) getExactCard(ctx context.Context, selector card.OracleCardSele
 	}
 	exhaustedError := card.ErrUpstreamUnavailable
 	for attempt := 0; attempt <= a.maxRetries; attempt++ {
-		if err := sharedLimiters.wait(ctx, a.baseURL.Host+"|named-search", a.namedInterval); err != nil {
+		if err := sharedLimiters.wait(ctx, a.baseURL.Host, classNamedSearch, a.namedInterval); err != nil {
 			if errors.Is(err, context.Canceled) {
 				return exactCardResult{}, err
 			}
@@ -397,31 +414,101 @@ func sameDestination(a, b *url.URL) bool {
 }
 
 type limiterRegistry struct {
-	mu   sync.Mutex
-	next map[string]time.Time
+	mu     sync.Mutex
+	states map[limiterKey]*limiterState
 }
 
-var sharedLimiters = limiterRegistry{next: make(map[string]time.Time)}
+type limiterKey struct {
+	host  string
+	class endpointClass
+}
+type limiterWaiter struct{ wake chan struct{} }
+type limiterState struct {
+	last  time.Time
+	queue []*limiterWaiter
+}
 
-func (r *limiterRegistry) wait(ctx context.Context, host string, interval time.Duration) error {
+var sharedLimiters = limiterRegistry{states: make(map[limiterKey]*limiterState)}
+
+func (r *limiterRegistry) wait(ctx context.Context, host string, class endpointClass, interval time.Duration) error {
 	if interval <= 0 {
 		return nil
 	}
+	key := limiterKey{host: host, class: class}
+	w := &limiterWaiter{wake: make(chan struct{}, 1)}
 	r.mu.Lock()
-	now := time.Now()
-	ready := r.next[host]
-	if ready.Before(now) {
-		ready = now
+	state := r.states[key]
+	if state == nil {
+		state = &limiterState{}
+		r.states[key] = state
 	}
-	r.next[host] = ready.Add(interval)
+	state.queue = append(state.queue, w)
+	if len(state.queue) == 1 {
+		w.wake <- struct{}{}
+	}
 	r.mu.Unlock()
-	timer := time.NewTimer(time.Until(ready))
-	defer timer.Stop()
-	select {
-	case <-ctx.Done():
-		return ctx.Err()
-	case <-timer.C:
-		return nil
+	for {
+		select {
+		case <-ctx.Done():
+			r.cancel(key, w)
+			return ctx.Err()
+		case <-w.wake:
+			r.mu.Lock()
+			state = r.states[key]
+			if state == nil || len(state.queue) == 0 || state.queue[0] != w {
+				r.mu.Unlock()
+				continue
+			}
+			ready := state.last.Add(interval)
+			r.mu.Unlock()
+			delay := time.Until(ready)
+			if delay > 0 {
+				timer := time.NewTimer(delay)
+				select {
+				case <-ctx.Done():
+					timer.Stop()
+					r.cancel(key, w)
+					return ctx.Err()
+				case <-timer.C:
+				}
+			}
+			if err := ctx.Err(); err != nil {
+				r.cancel(key, w)
+				return err
+			}
+			r.mu.Lock()
+			state = r.states[key]
+			if state != nil && len(state.queue) > 0 && state.queue[0] == w {
+				state.queue = state.queue[1:]
+				state.last = time.Now()
+				if len(state.queue) > 0 {
+					state.queue[0].wake <- struct{}{}
+				}
+				r.mu.Unlock()
+				return nil
+			}
+			r.mu.Unlock()
+		}
+	}
+}
+
+func (r *limiterRegistry) cancel(key limiterKey, target *limiterWaiter) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	state := r.states[key]
+	if state == nil {
+		return
+	}
+	for i, waiter := range state.queue {
+		if waiter != target {
+			continue
+		}
+		wasHead := i == 0
+		state.queue = append(state.queue[:i], state.queue[i+1:]...)
+		if wasHead && len(state.queue) > 0 {
+			state.queue[0].wake <- struct{}{}
+		}
+		return
 	}
 }
 
@@ -434,7 +521,7 @@ func (a *Adapter) GetPrinting(ctx context.Context, selector card.PrintingSelecto
 	endpoint := endpointURL.String()
 	exhaustedError := card.ErrUpstreamUnavailable
 	for attempt := 0; attempt <= a.maxRetries; attempt++ {
-		if err := sharedLimiters.wait(ctx, a.baseURL.Host+"|other", a.otherInterval); err != nil {
+		if err := sharedLimiters.wait(ctx, a.baseURL.Host, classOther, a.otherInterval); err != nil {
 			if errors.Is(err, context.Canceled) {
 				return card.PrintingResult{}, err
 			}
@@ -506,14 +593,14 @@ func (a *Adapter) GetRulings(ctx context.Context, selector card.OracleCardSelect
 	}
 	var single upstreamCard
 	if isSearch {
-		if err := a.getJSON(ctx, lookup.String(), "named-search", a.namedInterval, &page); err != nil {
+		if err := a.getJSON(ctx, lookup.String(), classNamedSearch, a.namedInterval, &page); err != nil {
 			return card.RulingsResult{}, err
 		}
 		if len(page.Data) != 1 {
 			return card.RulingsResult{}, card.ErrNotFound
 		}
 		single = page.Data[0]
-	} else if err := a.getJSON(ctx, lookup.String(), "named-search", a.namedInterval, &single); err != nil {
+	} else if err := a.getJSON(ctx, lookup.String(), classNamedSearch, a.namedInterval, &single); err != nil {
 		return card.RulingsResult{}, err
 	}
 	if single.ID == "" {
@@ -525,7 +612,7 @@ func (a *Adapter) GetRulings(ctx context.Context, selector card.OracleCardSelect
 	var rulingsPage struct {
 		Data []upstreamRuling `json:"data"`
 	}
-	if err := a.getJSON(ctx, endpoint.String(), "other", a.otherInterval, &rulingsPage); err != nil {
+	if err := a.getJSON(ctx, endpoint.String(), classOther, a.otherInterval, &rulingsPage); err != nil {
 		return card.RulingsResult{}, err
 	}
 	rulings := make([]card.Ruling, 0, len(rulingsPage.Data))
@@ -535,10 +622,10 @@ func (a *Adapter) GetRulings(ctx context.Context, selector card.OracleCardSelect
 	return card.RulingsResult{Rulings: rulings, SourceURL: endpoint.String(), FetchedAt: a.now().UTC()}, nil
 }
 
-func (a *Adapter) getJSON(ctx context.Context, endpoint, class string, interval time.Duration, target any) error {
+func (a *Adapter) getJSON(ctx context.Context, endpoint string, class endpointClass, interval time.Duration, target any) error {
 	exhausted := card.ErrUpstreamUnavailable
 	for attempt := 0; attempt <= a.maxRetries; attempt++ {
-		if err := sharedLimiters.wait(ctx, a.baseURL.Host+"|"+class, interval); err != nil {
+		if err := sharedLimiters.wait(ctx, a.baseURL.Host, class, interval); err != nil {
 			if errors.Is(err, context.Canceled) {
 				return err
 			}
