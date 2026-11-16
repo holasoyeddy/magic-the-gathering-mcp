@@ -41,7 +41,7 @@ func TestSearchCardsDiscoveryAndDefaults(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(listed.Tools) != 4 || listed.Tools[0].Name != "get_oracle_card" || listed.Tools[1].Name != "get_printing" || listed.Tools[2].Name != "get_rulings" || listed.Tools[3].Name != "search_cards" {
+	if len(listed.Tools) != 5 || listed.Tools[0].Name != "search_cards" || listed.Tools[1].Name != "get_oracle_card" || listed.Tools[2].Name != "get_printing" || listed.Tools[3].Name != "get_rulings" || listed.Tools[4].Name != "get_card_legality" {
 		t.Fatalf("tools = %#v", listed.Tools)
 	}
 	result, err := session.CallTool(context.Background(), &mcp.CallToolParams{Name: "search_cards", Arguments: map[string]any{"query": " t:goblin "}})

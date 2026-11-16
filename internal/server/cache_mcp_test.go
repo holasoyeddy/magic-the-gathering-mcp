@@ -23,11 +23,35 @@ type synchronizedAdapter struct {
 	release chan struct{}
 }
 
+type legalityCacheAdapter struct {
+	mu     sync.Mutex
+	result card.LegalityResult
+	err    error
+	calls  int
+}
+
 type rulingsCacheAdapter struct {
 	result card.RulingsResult
 	err    error
 	calls  int
 }
+
+func (a *legalityCacheAdapter) GetOracleCard(context.Context, card.OracleCardSelector) (card.OracleCardResult, error) {
+	return card.OracleCardResult{}, errors.New("unexpected")
+}
+func (a *legalityCacheAdapter) GetPrinting(context.Context, card.PrintingSelector) (card.PrintingResult, error) {
+	return card.PrintingResult{}, errors.New("unexpected")
+}
+func (a *legalityCacheAdapter) GetRulings(context.Context, card.OracleCardSelector) (card.RulingsResult, error) {
+	return card.RulingsResult{}, errors.New("unexpected")
+}
+func (a *legalityCacheAdapter) GetCardLegality(context.Context, card.OracleCardSelector) (card.LegalityResult, error) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.calls++
+	return a.result, a.err
+}
+func (a *legalityCacheAdapter) count() int { a.mu.Lock(); defer a.mu.Unlock(); return a.calls }
 
 func (a *rulingsCacheAdapter) GetOracleCard(context.Context, card.OracleCardSelector) (card.OracleCardResult, error) {
 	return card.OracleCardResult{}, errors.New("unexpected")
@@ -38,6 +62,9 @@ func (a *rulingsCacheAdapter) GetPrinting(context.Context, card.PrintingSelector
 func (a *rulingsCacheAdapter) GetRulings(context.Context, card.OracleCardSelector) (card.RulingsResult, error) {
 	a.calls++
 	return a.result, a.err
+}
+func (a *rulingsCacheAdapter) GetCardLegality(context.Context, card.OracleCardSelector) (card.LegalityResult, error) {
+	return card.LegalityResult{}, errors.New("unexpected")
 }
 
 func (a *synchronizedAdapter) GetOracleCard(ctx context.Context, _ card.OracleCardSelector) (card.OracleCardResult, error) {
@@ -62,6 +89,9 @@ func (a *synchronizedAdapter) GetPrinting(context.Context, card.PrintingSelector
 }
 func (a *synchronizedAdapter) GetRulings(context.Context, card.OracleCardSelector) (card.RulingsResult, error) {
 	return card.RulingsResult{}, errors.New("unexpected")
+}
+func (a *synchronizedAdapter) GetCardLegality(context.Context, card.OracleCardSelector) (card.LegalityResult, error) {
+	return card.LegalityResult{}, errors.New("unexpected")
 }
 func (a *synchronizedAdapter) count() int { a.mu.Lock(); defer a.mu.Unlock(); return a.calls }
 
@@ -105,6 +135,44 @@ func TestMCPFreshHitAndStaleOutageFallback(t *testing.T) {
 	text := result.Content[0].(*mcp.TextContent).Text
 	if !strings.Contains(text, `"code":"upstream_unavailable"`) {
 		t.Fatalf("expired stale error=%s", text)
+	}
+}
+
+func TestCardLegalityUsesFreshCacheAndStaleOutageFallback(t *testing.T) {
+	original := time.Date(2026, 11, 16, 12, 0, 0, 0, time.UTC)
+	now := original
+	live := &legalityCacheAdapter{result: card.LegalityResult{
+		Legality:  card.CardLegality{OracleID: "11111111-1111-4111-8111-111111111111", Name: "Example", Formats: map[string]card.LegalityStatus{"standard": card.LegalityLegal}},
+		SourceURL: "https://api.scryfall.com/cards/named?exact=Example", FetchedAt: original,
+	}}
+	cache, err := cardcache.New(live, cardcache.Options{Directory: t.TempDir(), Now: func() time.Time { return now }, MaxBytes: 1 << 20})
+	if err != nil {
+		t.Fatal(err)
+	}
+	session := connect(t, cache)
+	call := func() card.LegalityResult {
+		result, err := session.CallTool(context.Background(), &mcp.CallToolParams{Name: "get_card_legality", Arguments: map[string]any{"name": "Example"}})
+		if err != nil || result.IsError {
+			t.Fatalf("result=%#v err=%v", result, err)
+		}
+		b, _ := json.Marshal(result.StructuredContent)
+		var got card.LegalityResult
+		if err := json.Unmarshal(b, &got); err != nil {
+			t.Fatal(err)
+		}
+		return got
+	}
+	if got := call(); got.Stale || live.count() != 1 {
+		t.Fatalf("live got=%#v calls=%d", got, live.count())
+	}
+	now = now.Add(23 * time.Hour)
+	if got := call(); got.Stale || live.count() != 1 {
+		t.Fatalf("fresh got=%#v calls=%d", got, live.count())
+	}
+	now = now.Add(2 * time.Hour)
+	live.err = card.ErrUpstreamUnavailable
+	if got := call(); !got.Stale || !got.FetchedAt.Equal(original) || live.count() != 2 {
+		t.Fatalf("stale got=%#v calls=%d", got, live.count())
 	}
 }
 
