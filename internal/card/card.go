@@ -88,6 +88,13 @@ type PrintingResult struct {
 
 var ErrNotFound = errors.New("oracle card not found")
 
+var (
+	ErrInvalidQuery        = errors.New("invalid query")
+	ErrInvalidIdentifier   = errors.New("invalid identifier")
+	ErrRateLimited         = errors.New("rate limited")
+	ErrUpstreamUnavailable = errors.New("upstream unavailable")
+)
+
 type Adapter interface {
 	GetOracleCard(context.Context, OracleCardSelector) (OracleCardResult, error)
 	GetPrinting(context.Context, PrintingSelector) (PrintingResult, error)

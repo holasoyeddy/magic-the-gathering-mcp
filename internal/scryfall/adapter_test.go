@@ -2,10 +2,14 @@ package scryfall_test
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/holasoyeddy/magic-the-gathering-mcp/internal/card"
 	"github.com/holasoyeddy/magic-the-gathering-mcp/internal/scryfall"
@@ -17,6 +21,173 @@ func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) { retu
 
 func response(status int, body string) *http.Response {
 	return &http.Response{StatusCode: status, Body: io.NopCloser(strings.NewReader(body)), Header: make(http.Header)}
+}
+
+func TestTransientFailuresRetryAtMostTwice(t *testing.T) {
+	calls := 0
+	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		calls++
+		return response(http.StatusServiceUnavailable, `private upstream body`), nil
+	})}
+	_, err := scryfall.NewAdapterWithOptions("https://retry.scryfall.test", client, scryfall.Options{MaxRetries: 2}).GetOracleCard(context.Background(), card.OracleCardSelector{Name: "Example"})
+	if !errors.Is(err, card.ErrUpstreamUnavailable) || calls != 3 {
+		t.Fatalf("error=%v calls=%d", err, calls)
+	}
+}
+
+func TestDefinitiveClientFailuresAreNotRetried(t *testing.T) {
+	for _, status := range []int{http.StatusNotFound, http.StatusBadRequest} {
+		calls := 0
+		client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+			calls++
+			return response(status, `do not expose me`), nil
+		})}
+		_, _ = scryfall.NewAdapterWithOptions(fmt.Sprintf("https://no-retry-%d.scryfall.test", status), client, scryfall.Options{MaxRetries: 2}).GetOracleCard(context.Background(), card.OracleCardSelector{Name: "Example"})
+		if calls != 1 {
+			t.Fatalf("status %d calls=%d", status, calls)
+		}
+	}
+}
+
+func TestRetryAfterIsHonored(t *testing.T) {
+	calls := 0
+	started := time.Now()
+	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		calls++
+		if calls == 1 {
+			res := response(http.StatusTooManyRequests, `{}`)
+			res.Header.Set("Retry-After", "1")
+			return res, nil
+		}
+		return response(http.StatusOK, `{"oracle_id":"11111111-1111-4111-8111-111111111111","name":"Example","layout":"normal","colors":[],"color_identity":[],"keywords":[]}`), nil
+	})}
+	_, err := scryfall.NewAdapterWithOptions("https://retry-after.scryfall.test", client, scryfall.Options{MaxRetries: 1}).GetOracleCard(context.Background(), card.OracleCardSelector{Name: "Example"})
+	if err != nil || time.Since(started) < time.Second {
+		t.Fatalf("error=%v elapsed=%s", err, time.Since(started))
+	}
+}
+
+func TestExhaustedRateLimitRemainsRateLimited(t *testing.T) {
+	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		res := response(http.StatusTooManyRequests, `private body`)
+		res.Header.Set("Retry-After", "0")
+		return res, nil
+	})}
+	_, err := scryfall.NewAdapterWithOptions("https://rate-limit.scryfall.test", client, scryfall.Options{MaxRetries: 1}).GetOracleCard(context.Background(), card.OracleCardSelector{Name: "Example"})
+	if !errors.Is(err, card.ErrRateLimited) {
+		t.Fatalf("error=%v", err)
+	}
+}
+
+func TestSharedLimiterSpacesNamedRequests(t *testing.T) {
+	var mu sync.Mutex
+	var calls []time.Time
+	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		mu.Lock()
+		calls = append(calls, time.Now())
+		mu.Unlock()
+		return response(http.StatusOK, `{"name":"Example","layout":"normal","colors":[],"color_identity":[],"keywords":[]}`), nil
+	})}
+	a := scryfall.NewAdapterWithOptions("https://spacing.scryfall.test", client, scryfall.Options{NamedInterval: 40 * time.Millisecond})
+	b := scryfall.NewAdapterWithOptions("https://spacing.scryfall.test", client, scryfall.Options{NamedInterval: 40 * time.Millisecond})
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		_, _ = a.GetOracleCard(context.Background(), card.OracleCardSelector{Name: "A"})
+	}()
+	go func() {
+		defer wg.Done()
+		_, _ = b.GetOracleCard(context.Background(), card.OracleCardSelector{Name: "B"})
+	}()
+	wg.Wait()
+	if len(calls) != 2 || calls[1].Sub(calls[0]) < 35*time.Millisecond {
+		t.Fatalf("call times = %v", calls)
+	}
+}
+
+func TestLimiterUsesEndpointClassIntervals(t *testing.T) {
+	var mu sync.Mutex
+	times := map[string][]time.Time{"named": {}, "other": {}}
+	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		class := "other"
+		body := `{"id":"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa","name":"Print","lang":"en","set":"tst","collector_number":"1","finishes":[]}`
+		if r.URL.Path == "/cards/named" {
+			class = "named"
+			body = `{"name":"Oracle","layout":"normal","colors":[],"color_identity":[],"keywords":[]}`
+		}
+		mu.Lock()
+		times[class] = append(times[class], time.Now())
+		mu.Unlock()
+		return response(http.StatusOK, body), nil
+	})}
+	a := scryfall.NewAdapterWithOptions("https://classes.scryfall.test", client, scryfall.Options{NamedInterval: 60 * time.Millisecond, OtherInterval: 15 * time.Millisecond})
+	var wg sync.WaitGroup
+	wg.Add(4)
+	for _, name := range []string{"A", "B"} {
+		go func() {
+			defer wg.Done()
+			_, _ = a.GetOracleCard(context.Background(), card.OracleCardSelector{Name: name})
+		}()
+	}
+	for _, id := range []string{"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"} {
+		go func() {
+			defer wg.Done()
+			_, _ = a.GetPrinting(context.Background(), card.PrintingSelector{ScryfallID: id})
+		}()
+	}
+	wg.Wait()
+	if got := times["named"]; len(got) != 2 || got[1].Sub(got[0]) < 55*time.Millisecond {
+		t.Fatalf("named call times = %v", got)
+	}
+	if got := times["other"]; len(got) != 2 || got[1].Sub(got[0]) < 12*time.Millisecond || got[1].Sub(got[0]) >= 50*time.Millisecond {
+		t.Fatalf("other call times = %v", got)
+	}
+}
+
+func TestLimiterDeadlineReturnsRateLimited(t *testing.T) {
+	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		return response(http.StatusOK, `{"name":"Example","layout":"normal","colors":[],"color_identity":[],"keywords":[]}`), nil
+	})}
+	a := scryfall.NewAdapterWithOptions("https://limited.scryfall.test", client, scryfall.Options{NamedInterval: time.Second})
+	_, _ = a.GetOracleCard(context.Background(), card.OracleCardSelector{Name: "A"})
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+	_, err := a.GetOracleCard(ctx, card.OracleCardSelector{Name: "B"})
+	if !errors.Is(err, card.ErrRateLimited) {
+		t.Fatalf("error=%v", err)
+	}
+}
+
+func TestCancellationStopsLimiterWait(t *testing.T) {
+	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		return response(http.StatusOK, `{"name":"Example","layout":"normal","colors":[],"color_identity":[],"keywords":[]}`), nil
+	})}
+	a := scryfall.NewAdapterWithOptions("https://cancel.scryfall.test", client, scryfall.Options{NamedInterval: time.Second})
+	_, _ = a.GetOracleCard(context.Background(), card.OracleCardSelector{Name: "A"})
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	_, err := a.GetOracleCard(ctx, card.OracleCardSelector{Name: "B"})
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("error=%v", err)
+	}
+}
+
+func TestCrossHostRedirectIsRejectedBeforeHeadersAreForwarded(t *testing.T) {
+	forwarded := false
+	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		if r.URL.Host == "evil.test" {
+			forwarded = r.Header.Get("User-Agent") != "" || r.Header.Get("Accept") != ""
+			return response(http.StatusOK, `{}`), nil
+		}
+		res := response(http.StatusFound, ``)
+		res.Header.Set("Location", "https://evil.test/cards/named")
+		return res, nil
+	})}
+	_, err := scryfall.NewAdapterWithOptions("https://boundary.scryfall.test", client, scryfall.Options{}).GetOracleCard(context.Background(), card.OracleCardSelector{Name: "Example"})
+	if !errors.Is(err, card.ErrUpstreamUnavailable) || forwarded {
+		t.Fatalf("error=%v forwarded=%v", err, forwarded)
+	}
 }
 
 func TestExactNameLookupTranslatesScryfallCard(t *testing.T) {

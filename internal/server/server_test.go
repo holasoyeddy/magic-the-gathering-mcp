@@ -3,7 +3,9 @@ package server_test
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -24,6 +26,98 @@ type fakeAdapter struct {
 func (f *fakeAdapter) GetPrinting(_ context.Context, selector card.PrintingSelector) (card.PrintingResult, error) {
 	f.printingCalls = append(f.printingCalls, selector)
 	return f.printingResult, f.printingErr
+}
+
+func TestExpectedAdapterFailuresHaveStableToolCodes(t *testing.T) {
+	tests := []struct {
+		err  error
+		code string
+	}{
+		{card.ErrInvalidQuery, "invalid_query"},
+		{card.ErrInvalidIdentifier, "invalid_identifier"},
+		{card.ErrRateLimited, "rate_limited"},
+		{card.ErrUpstreamUnavailable, "upstream_unavailable"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.code, func(t *testing.T) {
+			result, err := connect(t, &fakeAdapter{err: fmt.Errorf("private upstream detail: %w", tt.err)}).CallTool(context.Background(), &mcp.CallToolParams{Name: "get_oracle_card", Arguments: map[string]any{"name": "Example"}})
+			if err != nil || !result.IsError {
+				t.Fatalf("result=%#v err=%v", result, err)
+			}
+			text := result.Content[0].(*mcp.TextContent).Text
+			if strings.Contains(text, "private upstream detail") {
+				t.Fatalf("leaked error: %s", text)
+			}
+			var problem map[string]any
+			if json.Unmarshal([]byte(text), &problem) != nil || problem["code"] != tt.code {
+				t.Fatalf("error = %q", text)
+			}
+		})
+	}
+}
+
+func TestUnexpectedAdapterFailureIsGeneric(t *testing.T) {
+	result, err := connect(t, &fakeAdapter{err: errors.New("secret parse failure")}).CallTool(context.Background(), &mcp.CallToolParams{Name: "get_oracle_card", Arguments: map[string]any{"name": "Example"}})
+	if err != nil || !result.IsError {
+		t.Fatalf("result=%#v err=%v", result, err)
+	}
+	text := result.Content[0].(*mcp.TextContent).Text
+	if strings.Contains(text, "secret parse failure") || !strings.Contains(text, `"code":"internal_error"`) {
+		t.Fatalf("error = %q", text)
+	}
+}
+
+func TestPrintingFailuresHaveStableSanitizedToolErrors(t *testing.T) {
+	tests := []struct {
+		name    string
+		failure error
+		code    string
+	}{
+		{"not found", card.ErrNotFound, "not_found"},
+		{"rate limited", card.ErrRateLimited, "rate_limited"},
+		{"upstream unavailable", card.ErrUpstreamUnavailable, "upstream_unavailable"},
+		{"unexpected", errors.New("database password in diagnostic"), "internal_error"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			wrapped := fmt.Errorf("private upstream detail: %w", tt.failure)
+			result, err := connect(t, &fakeAdapter{printingErr: wrapped}).CallTool(context.Background(), &mcp.CallToolParams{Name: "get_printing", Arguments: map[string]any{"scryfall_id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"}})
+			if err != nil || !result.IsError {
+				t.Fatalf("result=%#v err=%v", result, err)
+			}
+			text := result.Content[0].(*mcp.TextContent).Text
+			if strings.Contains(text, "private upstream detail") || strings.Contains(text, "database password") {
+				t.Fatalf("leaked error: %s", text)
+			}
+			var problem map[string]any
+			if json.Unmarshal([]byte(text), &problem) != nil || problem["code"] != tt.code {
+				t.Fatalf("error = %q", text)
+			}
+		})
+	}
+}
+
+func TestCancellationPropagatesToAdapter(t *testing.T) {
+	adapter := adapterFunc(func(ctx context.Context, _ card.OracleCardSelector) (card.OracleCardResult, error) {
+		<-ctx.Done()
+		return card.OracleCardResult{}, ctx.Err()
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	_, err := connect(t, adapter).CallTool(ctx, &mcp.CallToolParams{Name: "get_oracle_card", Arguments: map[string]any{"name": "Example"}})
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("error = %v, want canceled", err)
+	}
+}
+
+type adapterFunc func(context.Context, card.OracleCardSelector) (card.OracleCardResult, error)
+
+func (f adapterFunc) GetOracleCard(ctx context.Context, selector card.OracleCardSelector) (card.OracleCardResult, error) {
+	return f(ctx, selector)
+}
+
+func (f adapterFunc) GetPrinting(context.Context, card.PrintingSelector) (card.PrintingResult, error) {
+	return card.PrintingResult{}, errors.New("unexpected printing call")
 }
 
 func (f *fakeAdapter) GetOracleCard(_ context.Context, selector card.OracleCardSelector) (card.OracleCardResult, error) {
