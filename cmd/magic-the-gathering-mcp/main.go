@@ -7,6 +7,7 @@ import (
 	"os"
 
 	"github.com/holasoyeddy/magic-the-gathering-mcp/internal/cardcache"
+	"github.com/holasoyeddy/magic-the-gathering-mcp/internal/config"
 	"github.com/holasoyeddy/magic-the-gathering-mcp/internal/scryfall"
 	cardserver "github.com/holasoyeddy/magic-the-gathering-mcp/internal/server"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
@@ -14,8 +15,17 @@ import (
 
 func main() {
 	logger := log.New(os.Stderr, "magic-the-gathering-mcp: ", log.LstdFlags)
+	cfg, err := config.Load()
+	if err != nil {
+		logger.Printf("invalid configuration: %v", err)
+		os.Exit(2)
+	}
 	live := scryfall.NewAdapter("https://api.scryfall.com", http.DefaultClient)
-	adapter, err := cardcache.New(live, cardcache.Options{Diagnostic: logger.Printf})
+	diagnostic := func(string, ...any) {}
+	if cfg.LogLevel != "error" {
+		diagnostic = logger.Printf
+	}
+	adapter, err := cardcache.New(live, cardcache.Options{Directory: cfg.CacheDirectory, MaxBytes: cfg.CacheMaxBytes, RetainFor: cfg.CacheRetention, Diagnostic: diagnostic})
 	if err != nil {
 		logger.Printf("initialize cache: %v", err)
 		os.Exit(1)

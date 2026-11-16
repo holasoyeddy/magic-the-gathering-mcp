@@ -97,6 +97,26 @@ func TestStaleFallbackPreservesTimestampAndRejectsExpired(t *testing.T) {
 	}
 }
 
+func TestConfiguredRetentionControlsStaleFallback(t *testing.T) {
+	dir := t.TempDir()
+	fetched := time.Date(2026, 11, 1, 12, 0, 0, 0, time.UTC)
+	selector := card.OracleCardSelector{Name: "Example"}
+	seed, err := cardcache.New(&fake{oracle: oracleResult(fetched)}, cardcache.Options{Directory: dir, Now: func() time.Time { return fetched }, MaxBytes: 1 << 20, RetainFor: 48 * time.Hour})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := seed.GetOracleCard(context.Background(), selector); err != nil {
+		t.Fatal(err)
+	}
+	offline, err := cardcache.New(&fake{oracleErr: card.ErrUpstreamUnavailable}, cardcache.Options{Directory: dir, Now: func() time.Time { return fetched.Add(49 * time.Hour) }, MaxBytes: 1 << 20, RetainFor: 48 * time.Hour})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := offline.GetOracleCard(context.Background(), selector); !errors.Is(err, card.ErrUpstreamUnavailable) {
+		t.Fatalf("error = %v, want expired cache miss", err)
+	}
+}
+
 func TestConcurrentIdenticalMissesCoalesceAndDistinctMissesDoNot(t *testing.T) {
 	gate := make(chan struct{})
 	live := &fake{oracle: oracleResult(time.Now()), gate: gate}

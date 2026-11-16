@@ -21,7 +21,7 @@ const (
 	schemaVersion        = 1
 	defaultMaxBytes      = int64(256 << 20)
 	freshFor             = 24 * time.Hour
-	retainFor            = 30 * 24 * time.Hour
+	defaultRetainFor     = 30 * 24 * time.Hour
 	DirectoryEnvironment = "MTG_MCP_CACHE_DIR"
 )
 
@@ -29,6 +29,7 @@ type Options struct {
 	Directory  string
 	Now        func() time.Time
 	MaxBytes   int64
+	RetainFor  time.Duration
 	Diagnostic func(string, ...any)
 }
 
@@ -37,6 +38,7 @@ type Cache struct {
 	dir        string
 	now        func() time.Time
 	maxBytes   int64
+	retainFor  time.Duration
 	diagnostic func(string, ...any)
 	mu         sync.Mutex
 	inflight   map[string]*flight
@@ -102,13 +104,19 @@ func New(inner card.Adapter, options Options) (*Cache, error) {
 	if options.MaxBytes < 1 {
 		return nil, errors.New("cache maximum size must be positive")
 	}
+	if options.RetainFor == 0 {
+		options.RetainFor = defaultRetainFor
+	}
+	if options.RetainFor < 1 {
+		return nil, errors.New("cache retention must be positive")
+	}
 	if options.Diagnostic == nil {
 		options.Diagnostic = func(string, ...any) {}
 	}
 	if err := os.MkdirAll(dir, 0700); err != nil {
 		return nil, fmt.Errorf("create cache directory: %w", err)
 	}
-	c := &Cache{inner: inner, dir: dir, now: options.Now, maxBytes: options.MaxBytes, diagnostic: options.Diagnostic, inflight: make(map[string]*flight), fs: operatingSystem()}
+	c := &Cache{inner: inner, dir: dir, now: options.Now, maxBytes: options.MaxBytes, retainFor: options.RetainFor, diagnostic: options.Diagnostic, inflight: make(map[string]*flight), fs: operatingSystem()}
 	c.cleanup()
 	return c, nil
 }
@@ -235,7 +243,7 @@ func (c *Cache) get(ctx context.Context, operation, key string, live func() (any
 		return value, nil
 	}
 	if errors.Is(err, card.ErrRateLimited) || errors.Is(err, card.ErrUpstreamUnavailable) {
-		if cached, age, ok := c.read(operation, key); ok && age <= retainFor {
+		if cached, age, ok := c.read(operation, key); ok && age <= c.retainFor {
 			cached = markStale(cached)
 			f.value = cached
 			return cached, nil
@@ -301,7 +309,7 @@ func (c *Cache) read(operation, key string) (any, time.Duration, bool) {
 	if age < 0 {
 		age = 0
 	}
-	if age > retainFor {
+	if age > c.retainFor {
 		c.removeInvalid(path, "expired cache entry")
 		return nil, age, false
 	}
