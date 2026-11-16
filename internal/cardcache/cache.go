@@ -132,12 +132,8 @@ func (c *Cache) GetPrinting(ctx context.Context, selector card.PrintingSelector)
 }
 
 func (c *Cache) GetCardLegality(ctx context.Context, selector card.OracleCardSelector) (card.LegalityResult, error) {
-	inner, ok := c.inner.(card.LegalityAdapter)
-	if !ok {
-		return card.LegalityResult{}, errors.New("adapter does not support card legality")
-	}
 	key := legalityKey(selector)
-	value, err := c.get(ctx, "card-legality", key, func() (any, error) { return inner.GetCardLegality(ctx, selector) })
+	value, err := c.get(ctx, "card-legality", key, func() (any, error) { return c.inner.GetCardLegality(ctx, selector) })
 	if err != nil {
 		return card.LegalityResult{}, err
 	}

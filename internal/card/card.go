@@ -133,8 +133,5 @@ type Adapter interface {
 	GetOracleCard(context.Context, OracleCardSelector) (OracleCardResult, error)
 	GetPrinting(context.Context, PrintingSelector) (PrintingResult, error)
 	GetRulings(context.Context, OracleCardSelector) (RulingsResult, error)
-}
-
-type LegalityAdapter interface {
 	GetCardLegality(context.Context, OracleCardSelector) (LegalityResult, error)
 }

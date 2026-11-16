@@ -63,6 +63,9 @@ func (a *rulingsCacheAdapter) GetRulings(context.Context, card.OracleCardSelecto
 	a.calls++
 	return a.result, a.err
 }
+func (a *rulingsCacheAdapter) GetCardLegality(context.Context, card.OracleCardSelector) (card.LegalityResult, error) {
+	return card.LegalityResult{}, errors.New("unexpected")
+}
 
 func (a *synchronizedAdapter) GetOracleCard(ctx context.Context, _ card.OracleCardSelector) (card.OracleCardResult, error) {
 	a.mu.Lock()
@@ -86,6 +89,9 @@ func (a *synchronizedAdapter) GetPrinting(context.Context, card.PrintingSelector
 }
 func (a *synchronizedAdapter) GetRulings(context.Context, card.OracleCardSelector) (card.RulingsResult, error) {
 	return card.RulingsResult{}, errors.New("unexpected")
+}
+func (a *synchronizedAdapter) GetCardLegality(context.Context, card.OracleCardSelector) (card.LegalityResult, error) {
+	return card.LegalityResult{}, errors.New("unexpected")
 }
 func (a *synchronizedAdapter) count() int { a.mu.Lock(); defer a.mu.Unlock(); return a.calls }
 

@@ -18,6 +18,7 @@ func New(adapter card.Adapter) *mcp.Server {
 		&mcp.Implementation{Name: "magic-the-gathering-mcp", Version: "v0.1.0"},
 		&mcp.ServerOptions{Capabilities: &mcp.ServerCapabilities{}},
 	)
+	server.AddReceivingMiddleware(specToolOrder)
 	server.AddTool(&mcp.Tool{
 		Name:        "get_oracle_card",
 		Description: "Resolve an Oracle card by exact name or Oracle ID.",
@@ -108,11 +109,7 @@ func New(adapter card.Adapter) *mcp.Server {
 		if (input.Name == "") == (input.OracleID == "") || (input.OracleID != "" && !uuidPattern.MatchString(input.OracleID)) {
 			return toolError("invalid_identifier", "provide exactly one valid name or Oracle ID"), nil
 		}
-		legalityAdapter, ok := adapter.(card.LegalityAdapter)
-		if !ok {
-			return toolError("internal_error", "an internal error occurred"), nil
-		}
-		result, err := legalityAdapter.GetCardLegality(ctx, card.OracleCardSelector{Name: input.Name, OracleID: input.OracleID})
+		result, err := adapter.GetCardLegality(ctx, card.OracleCardSelector{Name: input.Name, OracleID: input.OracleID})
 		if err != nil {
 			return exactLookupError("get_card_legality", "no Oracle card matched the exact selector", err)
 		}
@@ -156,6 +153,34 @@ func New(adapter card.Adapter) *mcp.Server {
 		return &mcp.CallToolResult{StructuredContent: result}, nil
 	})
 	return server
+}
+
+func specToolOrder(next mcp.MethodHandler) mcp.MethodHandler {
+	return func(ctx context.Context, method string, request mcp.Request) (mcp.Result, error) {
+		result, err := next(ctx, method, request)
+		if err != nil || method != "tools/list" {
+			return result, err
+		}
+		listed, ok := result.(*mcp.ListToolsResult)
+		if !ok {
+			return result, nil
+		}
+		order := map[string]int{
+			"search_cards": 0, "get_oracle_card": 1, "get_printing": 2, "get_rulings": 3, "get_card_legality": 4,
+		}
+		sort.SliceStable(listed.Tools, func(i, j int) bool {
+			left, leftKnown := order[listed.Tools[i].Name]
+			right, rightKnown := order[listed.Tools[j].Name]
+			if leftKnown != rightKnown {
+				return leftKnown
+			}
+			if leftKnown {
+				return left < right
+			}
+			return listed.Tools[i].Name < listed.Tools[j].Name
+		})
+		return listed, nil
+	}
 }
 
 func exactLookupError(operation, notFoundMessage string, err error) (*mcp.CallToolResult, error) {

@@ -278,6 +278,16 @@ func TestCardLegalityByOracleIDUsesExactOracleQuery(t *testing.T) {
 	}
 }
 
+func TestCardLegalityRejectsUnknownUpstreamStatusWithoutLeakingIt(t *testing.T) {
+	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		return response(http.StatusOK, `{"oracle_id":"11111111-1111-4111-8111-111111111111","name":"Example","legalities":{"standard":"sometimes"}}`), nil
+	})}
+	result, err := scryfall.NewAdapter("https://api.scryfall.test", client).GetCardLegality(context.Background(), card.OracleCardSelector{Name: "Example"})
+	if err == nil || strings.Contains(err.Error(), "sometimes") || len(result.Legality.Formats) != 0 {
+		t.Fatalf("result=%#v err=%v", result, err)
+	}
+}
+
 func TestScryfallNotFoundIsDomainNotFound(t *testing.T) {
 	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) { return response(http.StatusNotFound, `{}`), nil })}
 	_, err := scryfall.NewAdapter("https://api.scryfall.test", client).GetOracleCard(context.Background(), card.OracleCardSelector{Name: "Missing"})

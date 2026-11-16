@@ -31,6 +31,10 @@ func (f *fakeAdapter) GetRulings(_ context.Context, selector card.OracleCardSele
 	return f.rulingsResult, f.rulingsErr
 }
 
+func (f *fakeAdapter) GetCardLegality(context.Context, card.OracleCardSelector) (card.LegalityResult, error) {
+	return card.LegalityResult{}, errors.New("unexpected legality call")
+}
+
 func (f *fakeAdapter) GetPrinting(_ context.Context, selector card.PrintingSelector) (card.PrintingResult, error) {
 	f.printingCalls = append(f.printingCalls, selector)
 	return f.printingResult, f.printingErr
@@ -130,6 +134,9 @@ func (f adapterFunc) GetPrinting(context.Context, card.PrintingSelector) (card.P
 func (f adapterFunc) GetRulings(context.Context, card.OracleCardSelector) (card.RulingsResult, error) {
 	return card.RulingsResult{}, errors.New("unexpected rulings call")
 }
+func (f adapterFunc) GetCardLegality(context.Context, card.OracleCardSelector) (card.LegalityResult, error) {
+	return card.LegalityResult{}, errors.New("unexpected legality call")
+}
 
 func (f *fakeAdapter) GetOracleCard(_ context.Context, selector card.OracleCardSelector) (card.OracleCardResult, error) {
 	f.calls = append(f.calls, selector)
@@ -160,8 +167,8 @@ func TestDiscoveryListsExactLookupToolsInDeterministicOrder(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(result.Tools) != 4 || result.Tools[0].Name != "get_card_legality" || result.Tools[1].Name != "get_oracle_card" || result.Tools[2].Name != "get_printing" || result.Tools[3].Name != "get_rulings" {
-		t.Fatalf("tools = %#v, want deterministic alphabetical order", result.Tools)
+	if len(result.Tools) != 4 || result.Tools[0].Name != "get_oracle_card" || result.Tools[1].Name != "get_printing" || result.Tools[2].Name != "get_rulings" || result.Tools[3].Name != "get_card_legality" {
+		t.Fatalf("tools = %#v, want specification order", result.Tools)
 	}
 }
 
