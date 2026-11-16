@@ -131,6 +131,19 @@ func (c *Cache) GetPrinting(ctx context.Context, selector card.PrintingSelector)
 	return value.(card.PrintingResult), nil
 }
 
+func (c *Cache) SearchCards(ctx context.Context, request card.SearchRequest) (card.SearchResult, error) {
+	searcher, ok := c.inner.(card.Searcher)
+	if !ok {
+		return card.SearchResult{}, errors.New("adapter does not support card search")
+	}
+	key := searchKey(request)
+	value, err := c.get(ctx, "card-search", key, func() (any, error) { return searcher.SearchCards(ctx, request) })
+	if err != nil {
+		return card.SearchResult{}, err
+	}
+	return value.(card.SearchResult), nil
+}
+
 func (c *Cache) GetRulings(ctx context.Context, selector card.OracleCardSelector) (card.RulingsResult, error) {
 	key := rulingsKey(selector)
 	value, err := c.get(ctx, "rulings", key, func() (any, error) { return c.inner.GetRulings(ctx, selector) })
@@ -152,6 +165,20 @@ func printingKey(s card.PrintingSelector) string {
 	}
 	return "v1:printing:catalog:" + strings.ToLower(strings.TrimSpace(s.SetCode)) + ":" + strings.TrimSpace(s.CollectorNumber)
 }
+func searchKey(request card.SearchRequest) string {
+	position := ""
+	if request.Continuation != nil {
+		position = request.Continuation.Position
+	}
+	encoded, _ := json.Marshal(struct {
+		Query string                `json:"query"`
+		Mode  card.SearchResultMode `json:"mode"`
+		Size  int                   `json:"size"`
+		Page  string                `json:"page"`
+	}{strings.TrimSpace(request.Query), request.ResultMode, request.PageSize, position})
+	return "v1:card-search:" + string(encoded)
+}
+
 func rulingsKey(s card.OracleCardSelector) string {
 	if s.OracleID != "" {
 		return "v1:rulings:oracle-id:" + strings.ToLower(strings.TrimSpace(s.OracleID))
@@ -211,6 +238,9 @@ func markStale(value any) any {
 	case card.PrintingResult:
 		result.Stale = true
 		return result
+	case card.SearchResult:
+		result.Stale = true
+		return result
 	case card.RulingsResult:
 		result.Stale = true
 		return result
@@ -235,6 +265,8 @@ func (c *Cache) read(operation, key string) (any, time.Duration, bool) {
 		value = &card.OracleCardResult{}
 	case "printing":
 		value = &card.PrintingResult{}
+	case "card-search":
+		value = &card.SearchResult{}
 	case "rulings":
 		value = &card.RulingsResult{}
 	default:
@@ -266,6 +298,9 @@ func (c *Cache) read(operation, key string) (any, time.Duration, bool) {
 	case *card.PrintingResult:
 		result.Stale = false
 		return *result, age, true
+	case *card.SearchResult:
+		result.Stale = false
+		return *result, age, true
 	case *card.RulingsResult:
 		result.Stale = false
 		return *result, age, true
@@ -283,6 +318,8 @@ func (c *Cache) write(operation, key string, value any) error {
 	case card.OracleCardResult:
 		fetched = result.FetchedAt.UTC()
 	case card.PrintingResult:
+		fetched = result.FetchedAt.UTC()
+	case card.SearchResult:
 		fetched = result.FetchedAt.UTC()
 	case card.RulingsResult:
 		fetched = result.FetchedAt.UTC()

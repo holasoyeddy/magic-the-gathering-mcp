@@ -238,6 +238,74 @@ func TestOracleIDLookupUsesExactOracleQuery(t *testing.T) {
 	}
 }
 
+func TestSearchCardsTranslatesPaginationAndModes(t *testing.T) {
+	for _, tt := range []struct {
+		mode   card.SearchResultMode
+		unique string
+	}{{card.SearchOracleCards, "cards"}, {card.SearchPrintings, "prints"}} {
+		t.Run(string(tt.mode), func(t *testing.T) {
+			calls := 0
+			client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+				calls++
+				if r.URL.Path != "/cards/search" || r.URL.Query().Get("q") != "t:goblin" || r.URL.Query().Get("unique") != tt.unique || r.URL.Query().Get("order") != "name" || r.URL.Query().Get("dir") != "auto" || r.URL.Query().Get("page") != fmt.Sprint(calls) {
+					t.Errorf("request URL = %s", r.URL)
+				}
+				if calls == 1 {
+					return response(http.StatusOK, `{"has_more":true,"next_page":"https://search.scryfall.test/cards/search?q=t%3Agoblin&unique=`+tt.unique+`&order=name&dir=auto&page=2","data":[{"id":"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa","oracle_id":"11111111-1111-4111-8111-111111111111","name":"Goblin Guide","mana_cost":"{R}","cmc":1,"type_line":"Creature — Goblin Scout","set":"zen","collector_number":"126","lang":"en"}]}`), nil
+				}
+				return response(http.StatusOK, `{"has_more":false,"data":[]}`), nil
+			})}
+			a := scryfall.NewAdapterWithOptions("https://search.scryfall.test", client, scryfall.Options{})
+			first, err := a.SearchCards(context.Background(), card.SearchRequest{Query: "t:goblin", ResultMode: tt.mode, PageSize: 1})
+			if err != nil || len(first.Results) != 1 || first.Next == nil || first.Results[0].Name != "Goblin Guide" {
+				t.Fatalf("first=%#v err=%v", first, err)
+			}
+			second, err := a.SearchCards(context.Background(), card.SearchRequest{Query: "t:goblin", ResultMode: tt.mode, PageSize: 1, Continuation: first.Next})
+			if err != nil || len(second.Results) != 0 || second.Next != nil {
+				t.Fatalf("second=%#v err=%v", second, err)
+			}
+		})
+	}
+}
+
+func TestSearchCardsRejectsInvalidQueryWithoutBody(t *testing.T) {
+	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		return response(http.StatusBadRequest, `private parser details`), nil
+	})}
+	_, err := scryfall.NewAdapterWithOptions("https://invalid-query.scryfall.test", client, scryfall.Options{}).SearchCards(context.Background(), card.SearchRequest{Query: "bad", ResultMode: card.SearchOracleCards, PageSize: 20})
+	if !errors.Is(err, card.ErrInvalidQuery) || strings.Contains(fmt.Sprint(err), "private") {
+		t.Fatalf("error=%v", err)
+	}
+}
+
+func TestSearchCardsTreatsNotFoundAsSuccessfulEmptyPage(t *testing.T) {
+	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		return response(http.StatusNotFound, `{"details":"Your query didn't match any cards"}`), nil
+	})}
+	result, err := scryfall.NewAdapterWithOptions("https://empty.scryfall.test", client, scryfall.Options{}).SearchCards(context.Background(), card.SearchRequest{Query: "name:does-not-exist", ResultMode: card.SearchOracleCards, PageSize: 20})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Results == nil || len(result.Results) != 0 || result.Next != nil || result.SourceURL == "" || result.FetchedAt.IsZero() || result.Stale {
+		t.Fatalf("result=%#v", result)
+	}
+}
+
+func TestSearchCardsBoundsPagesWithoutSkippingUpstreamResults(t *testing.T) {
+	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		return response(http.StatusOK, `{"has_more":false,"data":[{"name":"One"},{"name":"Two"},{"name":"Three"}]}`), nil
+	})}
+	a := scryfall.NewAdapterWithOptions("https://bounded.scryfall.test", client, scryfall.Options{})
+	first, err := a.SearchCards(context.Background(), card.SearchRequest{Query: "t:goblin", ResultMode: card.SearchOracleCards, PageSize: 2})
+	if err != nil || len(first.Results) != 2 || first.Results[0].Name != "One" || first.Results[1].Name != "Two" || first.Next == nil {
+		t.Fatalf("first=%#v err=%v", first, err)
+	}
+	second, err := a.SearchCards(context.Background(), card.SearchRequest{Query: "t:goblin", ResultMode: card.SearchOracleCards, PageSize: 2, Continuation: first.Next})
+	if err != nil || len(second.Results) != 1 || second.Results[0].Name != "Three" || second.Next != nil {
+		t.Fatalf("second=%#v err=%v", second, err)
+	}
+}
+
 func TestScryfallNotFoundIsDomainNotFound(t *testing.T) {
 	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) { return response(http.StatusNotFound, `{}`), nil })}
 	_, err := scryfall.NewAdapter("https://api.scryfall.test", client).GetOracleCard(context.Background(), card.OracleCardSelector{Name: "Missing"})
