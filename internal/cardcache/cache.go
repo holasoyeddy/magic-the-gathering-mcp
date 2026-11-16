@@ -40,6 +40,19 @@ type Cache struct {
 	diagnostic func(string, ...any)
 	mu         sync.Mutex
 	inflight   map[string]*flight
+	fs         filesystem
+}
+
+type filesystem struct {
+	readFile    func(string) ([]byte, error)
+	stat        func(string) (os.FileInfo, error)
+	remove      func(string) error
+	glob        func(string) ([]string, error)
+	atomicWrite func(string, []byte) error
+}
+
+func operatingSystem() filesystem {
+	return filesystem{readFile: os.ReadFile, stat: os.Stat, remove: os.Remove, glob: filepath.Glob, atomicWrite: atomicWrite}
 }
 
 type flight struct {
@@ -95,7 +108,9 @@ func New(inner card.Adapter, options Options) (*Cache, error) {
 	if err := os.MkdirAll(dir, 0700); err != nil {
 		return nil, fmt.Errorf("create cache directory: %w", err)
 	}
-	return &Cache{inner: inner, dir: dir, now: options.Now, maxBytes: options.MaxBytes, diagnostic: options.Diagnostic, inflight: make(map[string]*flight)}, nil
+	c := &Cache{inner: inner, dir: dir, now: options.Now, maxBytes: options.MaxBytes, diagnostic: options.Diagnostic, inflight: make(map[string]*flight), fs: operatingSystem()}
+	c.cleanup()
+	return c, nil
 }
 
 func (c *Cache) GetOracleCard(ctx context.Context, selector card.OracleCardSelector) (card.OracleCardResult, error) {
@@ -131,6 +146,7 @@ func printingKey(s card.PrintingSelector) string {
 
 func (c *Cache) get(ctx context.Context, operation, key string, live func() (any, error)) (any, error) {
 	if cached, age, ok := c.read(operation, key); ok && age <= freshFor {
+		c.cleanup()
 		return cached, nil
 	}
 	c.mu.Lock()
@@ -149,6 +165,7 @@ func (c *Cache) get(ctx context.Context, operation, key string, live func() (any
 	defer func() { c.mu.Lock(); delete(c.inflight, key); close(f.done); c.mu.Unlock() }()
 	// Re-read after winning the flight because another completed request may have populated disk.
 	if cached, age, ok := c.read(operation, key); ok && age <= freshFor {
+		c.cleanup()
 		f.value = cached
 		return cached, nil
 	}
@@ -185,13 +202,13 @@ func markStale(value any) any {
 
 func (c *Cache) read(operation, key string) (any, time.Duration, bool) {
 	path := c.path(key)
-	data, err := os.ReadFile(path)
+	data, err := c.fs.readFile(path)
 	if err != nil {
 		return nil, 0, false
 	}
 	var record entry
 	if json.Unmarshal(data, &record) != nil || record.SchemaVersion != schemaVersion || record.Key != key || record.Operation != operation || record.FetchedAt.IsZero() || record.Integrity != digest(record.Payload) {
-		_ = os.Remove(path)
+		c.removeInvalid(path, "corrupt or incompatible cache entry")
 		return nil, 0, false
 	}
 	var value any
@@ -204,7 +221,7 @@ func (c *Cache) read(operation, key string) (any, time.Duration, bool) {
 		return nil, 0, false
 	}
 	if json.Unmarshal(record.Payload, value) != nil {
-		_ = os.Remove(path)
+		c.removeInvalid(path, "corrupt cache payload")
 		return nil, 0, false
 	}
 	now := c.now().UTC()
@@ -213,12 +230,14 @@ func (c *Cache) read(operation, key string) (any, time.Duration, bool) {
 		age = 0
 	}
 	if age > retainFor {
-		_ = os.Remove(path)
+		c.removeInvalid(path, "expired cache entry")
 		return nil, age, false
 	}
 	record.LastAccess = now
 	if updated, err := json.Marshal(record); err == nil {
-		_ = atomicWrite(path, updated)
+		if err := c.fs.atomicWrite(path, updated); err != nil {
+			c.diagnostic("cache last-access update failed for %s: %v", path, err)
+		}
 	}
 	switch result := value.(type) {
 	case *card.OracleCardResult:
@@ -252,13 +271,23 @@ func (c *Cache) write(operation, key string, value any) error {
 	if err != nil {
 		return err
 	}
-	if err = atomicWrite(c.path(key), data); err != nil {
+	if err = c.fs.atomicWrite(c.path(key), data); err != nil {
 		return err
 	}
-	if err = c.evict(); err != nil {
+	c.cleanup()
+	return nil
+}
+
+func (c *Cache) removeInvalid(path, reason string) {
+	if err := c.fs.remove(path); err != nil {
+		c.diagnostic("%s removal failed for %s: %v", reason, path, err)
+	}
+}
+
+func (c *Cache) cleanup() {
+	if err := c.evict(); err != nil {
 		c.diagnostic("cache cleanup failed: %v", err)
 	}
-	return nil
 }
 
 func digest(data []byte) string {
@@ -291,7 +320,7 @@ func atomicWrite(path string, data []byte) error {
 }
 
 func (c *Cache) evict() error {
-	files, err := filepath.Glob(filepath.Join(c.dir, "*.json"))
+	files, err := c.fs.glob(filepath.Join(c.dir, "*.json"))
 	if err != nil {
 		return err
 	}
@@ -303,17 +332,25 @@ func (c *Cache) evict() error {
 	items := make([]item, 0, len(files))
 	var total int64
 	for _, path := range files {
-		info, e := os.Stat(path)
+		info, e := c.fs.stat(path)
 		if e != nil {
+			if removeErr := c.fs.remove(path); removeErr != nil {
+				return fmt.Errorf("account for unreadable cache entry %s: stat: %v; remove: %w", path, e, removeErr)
+			}
 			continue
 		}
-		data, e := os.ReadFile(path)
+		data, e := c.fs.readFile(path)
 		if e != nil {
+			if removeErr := c.fs.remove(path); removeErr != nil {
+				return fmt.Errorf("account for unreadable cache entry %s (%d bytes): read: %v; remove: %w", path, info.Size(), e, removeErr)
+			}
 			continue
 		}
 		var record entry
-		if json.Unmarshal(data, &record) != nil || record.SchemaVersion != schemaVersion {
-			_ = os.Remove(path)
+		if json.Unmarshal(data, &record) != nil || record.SchemaVersion != schemaVersion || record.Key == "" || record.Operation == "" || record.FetchedAt.IsZero() || record.Integrity != digest(record.Payload) {
+			if removeErr := c.fs.remove(path); removeErr != nil {
+				return fmt.Errorf("remove corrupt cache entry %s (%d bytes): %w", path, info.Size(), removeErr)
+			}
 			continue
 		}
 		items = append(items, item{path, info.Size(), record.LastAccess})
@@ -329,7 +366,7 @@ func (c *Cache) evict() error {
 		if total <= c.maxBytes {
 			break
 		}
-		if err := os.Remove(entry.path); err != nil {
+		if err := c.fs.remove(entry.path); err != nil {
 			return err
 		}
 		total -= entry.size
