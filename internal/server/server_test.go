@@ -143,14 +143,14 @@ func connect(t *testing.T, adapter card.Adapter) *mcp.ClientSession {
 	return clientSession
 }
 
-func TestDiscoveryListsExactLookupToolsInDeterministicOrder(t *testing.T) {
+func TestDiscoveryListsToolsInDeterministicOrder(t *testing.T) {
 	session := connect(t, &fakeAdapter{})
 	result, err := session.ListTools(context.Background(), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(result.Tools) != 2 || result.Tools[0].Name != "get_oracle_card" || result.Tools[1].Name != "get_printing" {
-		t.Fatalf("tools = %#v, want get_oracle_card then get_printing", result.Tools)
+	if len(result.Tools) != 3 || result.Tools[0].Name != "get_oracle_card" || result.Tools[1].Name != "get_printing" || result.Tools[2].Name != "search_cards" {
+		t.Fatalf("tools = %#v, want get_oracle_card, get_printing, search_cards", result.Tools)
 	}
 }
 

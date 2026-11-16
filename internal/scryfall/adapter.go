@@ -60,19 +60,150 @@ func NewAdapterWithOptions(baseURL string, client *http.Client, options Options)
 }
 
 type upstreamCard struct {
-	OracleID      string         `json:"oracle_id"`
-	Name          string         `json:"name"`
-	Layout        string         `json:"layout"`
-	ManaCost      *string        `json:"mana_cost"`
-	CMC           float64        `json:"cmc"`
-	TypeLine      *string        `json:"type_line"`
-	OracleText    *string        `json:"oracle_text"`
-	Colors        []string       `json:"colors"`
-	ColorIdentity []string       `json:"color_identity"`
-	Keywords      []string       `json:"keywords"`
-	ProducedMana  []string       `json:"produced_mana"`
-	CardFaces     []upstreamFace `json:"card_faces"`
+	ID              string         `json:"id"`
+	OracleID        string         `json:"oracle_id"`
+	Name            string         `json:"name"`
+	Layout          string         `json:"layout"`
+	ManaCost        *string        `json:"mana_cost"`
+	CMC             float64        `json:"cmc"`
+	TypeLine        *string        `json:"type_line"`
+	OracleText      *string        `json:"oracle_text"`
+	Colors          []string       `json:"colors"`
+	ColorIdentity   []string       `json:"color_identity"`
+	Keywords        []string       `json:"keywords"`
+	ProducedMana    []string       `json:"produced_mana"`
+	CardFaces       []upstreamFace `json:"card_faces"`
+	Set             string         `json:"set"`
+	CollectorNumber string         `json:"collector_number"`
+	Lang            string         `json:"lang"`
 }
+
+func (a *Adapter) SearchCards(ctx context.Context, request card.SearchRequest) (card.SearchResult, error) {
+	if a.baseURL == nil || a.baseURL.Scheme != "https" || a.baseURL.Host == "" {
+		return card.SearchResult{}, card.ErrUpstreamUnavailable
+	}
+	unique := "cards"
+	if request.ResultMode == card.SearchPrintings {
+		unique = "prints"
+	}
+	endpoint := *a.baseURL
+	endpoint.Path = strings.TrimRight(endpoint.Path, "/") + "/cards/search"
+	endpoint.RawQuery = url.Values{"q": {request.Query}, "unique": {unique}, "order": {"name"}, "dir": {"auto"}, "page": {"1"}}.Encode()
+	offset := 0
+	if request.Continuation != nil {
+		position := request.Continuation.Position
+		if separator := strings.LastIndex(position, "#offset="); separator >= 0 {
+			parsed, err := strconv.Atoi(position[separator+8:])
+			if err != nil || parsed < 0 {
+				return card.SearchResult{}, card.ErrInvalidIdentifier
+			}
+			offset = parsed
+			position = position[:separator]
+		}
+		next, err := url.Parse(position)
+		if err != nil || !sameDestination(next, a.baseURL) || next.Path != endpoint.Path || next.Query().Get("q") != request.Query || next.Query().Get("unique") != unique || next.Query().Get("order") != "name" || next.Query().Get("dir") != "auto" || next.Query().Get("page") == "" {
+			return card.SearchResult{}, card.ErrInvalidIdentifier
+		}
+		endpoint = *next
+	}
+	exhausted := error(card.ErrUpstreamUnavailable)
+	for attempt := 0; attempt <= a.maxRetries; attempt++ {
+		if err := sharedLimiters.wait(ctx, a.baseURL.Host+"|named-search", a.namedInterval); err != nil {
+			if errors.Is(err, context.Canceled) {
+				return card.SearchResult{}, err
+			}
+			return card.SearchResult{}, card.ErrRateLimited
+		}
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint.String(), nil)
+		if err != nil {
+			return card.SearchResult{}, err
+		}
+		req.Header.Set("Accept", "application/json")
+		req.Header.Set("User-Agent", userAgent)
+		response, err := a.client.Do(req)
+		if err != nil {
+			if ctx.Err() != nil {
+				return card.SearchResult{}, ctx.Err()
+			}
+			continue
+		}
+		if response.StatusCode == http.StatusTooManyRequests || response.StatusCode >= 500 {
+			retryAfter := parseRetryAfter(response.Header.Get("Retry-After"), a.now())
+			response.Body.Close()
+			if response.StatusCode == http.StatusTooManyRequests {
+				exhausted = card.ErrRateLimited
+			}
+			if attempt < a.maxRetries && retryAfter > 0 {
+				timer := time.NewTimer(retryAfter)
+				select {
+				case <-ctx.Done():
+					timer.Stop()
+					return card.SearchResult{}, ctx.Err()
+				case <-timer.C:
+				}
+			}
+			continue
+		}
+		if response.StatusCode == http.StatusBadRequest {
+			io.Copy(io.Discard, response.Body)
+			response.Body.Close()
+			return card.SearchResult{}, card.ErrInvalidQuery
+		}
+		if response.StatusCode < 200 || response.StatusCode >= 300 {
+			io.Copy(io.Discard, response.Body)
+			response.Body.Close()
+			return card.SearchResult{}, card.ErrUpstreamUnavailable
+		}
+		var page struct {
+			Data     []upstreamCard `json:"data"`
+			HasMore  bool           `json:"has_more"`
+			NextPage string         `json:"next_page"`
+		}
+		err = json.NewDecoder(response.Body).Decode(&page)
+		response.Body.Close()
+		if err != nil {
+			return card.SearchResult{}, fmt.Errorf("decode Scryfall search response: %w", err)
+		}
+		if offset > len(page.Data) {
+			return card.SearchResult{}, card.ErrInvalidIdentifier
+		}
+		end := offset + request.PageSize
+		if end > len(page.Data) {
+			end = len(page.Data)
+		}
+		summaries := make([]card.SearchSummary, 0, end-offset)
+		for _, raw := range page.Data[offset:end] {
+			summaries = append(summaries, searchSummary(raw, request.ResultMode))
+		}
+		result := card.SearchResult{Results: summaries, SourceURL: endpoint.String(), FetchedAt: a.now().UTC()}
+		if end < len(page.Data) {
+			result.Next = &card.SearchContinuation{Position: endpoint.String() + "#offset=" + strconv.Itoa(end)}
+		} else if page.HasMore && page.NextPage != "" {
+			result.Next = &card.SearchContinuation{Position: page.NextPage}
+		}
+		return result, nil
+	}
+	return card.SearchResult{}, exhausted
+}
+
+func searchSummary(raw upstreamCard, mode card.SearchResultMode) card.SearchSummary {
+	mana, typeLine := "", ""
+	if raw.ManaCost != nil {
+		mana = *raw.ManaCost
+	}
+	if raw.TypeLine != nil {
+		typeLine = *raw.TypeLine
+	}
+	result := card.SearchSummary{OracleID: raw.OracleID, Name: raw.Name, ManaCost: mana, ManaValue: raw.CMC, TypeLine: typeLine}
+	if mode == card.SearchPrintings {
+		result.ScryfallID = raw.ID
+		result.SetCode = strings.ToLower(raw.Set)
+		result.CollectorNumber = raw.CollectorNumber
+		result.Language = raw.Lang
+	}
+	return result
+}
+
 type upstreamFace struct {
 	Name        string            `json:"name"`
 	PrintedName *string           `json:"printed_name"`

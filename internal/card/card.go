@@ -86,6 +86,50 @@ type PrintingResult struct {
 	Stale     bool      `json:"stale"`
 }
 
+type SearchResultMode string
+
+const (
+	SearchOracleCards SearchResultMode = "oracle_cards"
+	SearchPrintings   SearchResultMode = "printings"
+)
+
+type SearchContinuation struct {
+	Position string `json:"position"`
+}
+
+type SearchRequest struct {
+	Query        string
+	ResultMode   SearchResultMode
+	PageSize     int
+	Continuation *SearchContinuation
+}
+
+// SearchSummary is deliberately compact: discovery identifies a card without
+// duplicating the full exact-lookup representations.
+type SearchSummary struct {
+	OracleID        string  `json:"oracle_id,omitempty"`
+	ScryfallID      string  `json:"scryfall_id,omitempty"`
+	Name            string  `json:"name"`
+	ManaCost        string  `json:"mana_cost,omitempty"`
+	ManaValue       float64 `json:"mana_value,omitempty"`
+	TypeLine        string  `json:"type_line,omitempty"`
+	SetCode         string  `json:"set_code,omitempty"`
+	CollectorNumber string  `json:"collector_number,omitempty"`
+	Language        string  `json:"language,omitempty"`
+}
+
+type SearchResult struct {
+	Results   []SearchSummary     `json:"results"`
+	Next      *SearchContinuation `json:"next,omitempty"`
+	SourceURL string              `json:"source_url"`
+	FetchedAt time.Time           `json:"fetched_at"`
+	Stale     bool                `json:"stale"`
+}
+
+type Searcher interface {
+	SearchCards(context.Context, SearchRequest) (SearchResult, error)
+}
+
 var ErrNotFound = errors.New("oracle card not found")
 
 var (
