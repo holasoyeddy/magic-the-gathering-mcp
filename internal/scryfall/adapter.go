@@ -60,6 +60,7 @@ func NewAdapterWithOptions(baseURL string, client *http.Client, options Options)
 }
 
 type upstreamCard struct {
+	ID            string         `json:"id"`
 	OracleID      string         `json:"oracle_id"`
 	Name          string         `json:"name"`
 	Layout        string         `json:"layout"`
@@ -72,6 +73,11 @@ type upstreamCard struct {
 	Keywords      []string       `json:"keywords"`
 	ProducedMana  []string       `json:"produced_mana"`
 	CardFaces     []upstreamFace `json:"card_faces"`
+}
+
+type upstreamRuling struct {
+	PublishedAt string `json:"published_at"`
+	Comment     string `json:"comment"`
 }
 type upstreamFace struct {
 	Name        string            `json:"name"`
@@ -300,6 +306,109 @@ func (a *Adapter) GetPrinting(ctx context.Context, selector card.PrintingSelecto
 		return card.PrintingResult{Printing: translatePrinting(raw), SourceURL: endpoint, FetchedAt: a.now().UTC(), Stale: false}, nil
 	}
 	return card.PrintingResult{}, exhaustedError
+}
+
+func (a *Adapter) GetRulings(ctx context.Context, selector card.OracleCardSelector) (card.RulingsResult, error) {
+	if a.baseURL == nil || a.baseURL.Scheme != "https" || a.baseURL.Host == "" {
+		return card.RulingsResult{}, card.ErrUpstreamUnavailable
+	}
+	lookup := *a.baseURL
+	lookup.Path = strings.TrimRight(lookup.Path, "/") + "/cards/named"
+	lookup.RawQuery = url.Values{"exact": {selector.Name}}.Encode()
+	isSearch := selector.OracleID != ""
+	if isSearch {
+		lookup.Path = strings.TrimRight(a.baseURL.Path, "/") + "/cards/search"
+		lookup.RawQuery = url.Values{"q": {"oracleid:" + selector.OracleID}, "unique": {"cards"}}.Encode()
+	}
+	var page struct {
+		Data []upstreamCard `json:"data"`
+	}
+	var single upstreamCard
+	if isSearch {
+		if err := a.getJSON(ctx, lookup.String(), "named-search", a.namedInterval, &page); err != nil {
+			return card.RulingsResult{}, err
+		}
+		if len(page.Data) != 1 {
+			return card.RulingsResult{}, card.ErrNotFound
+		}
+		single = page.Data[0]
+	} else if err := a.getJSON(ctx, lookup.String(), "named-search", a.namedInterval, &single); err != nil {
+		return card.RulingsResult{}, err
+	}
+	if single.ID == "" {
+		return card.RulingsResult{}, card.ErrUpstreamUnavailable
+	}
+	endpoint := *a.baseURL
+	endpoint.Path = strings.TrimRight(endpoint.Path, "/") + "/cards/" + url.PathEscape(single.ID) + "/rulings"
+	endpoint.RawQuery = ""
+	var rulingsPage struct {
+		Data []upstreamRuling `json:"data"`
+	}
+	if err := a.getJSON(ctx, endpoint.String(), "other", a.otherInterval, &rulingsPage); err != nil {
+		return card.RulingsResult{}, err
+	}
+	rulings := make([]card.Ruling, 0, len(rulingsPage.Data))
+	for _, ruling := range rulingsPage.Data {
+		rulings = append(rulings, card.Ruling{PublishedAt: ruling.PublishedAt, Comment: ruling.Comment})
+	}
+	return card.RulingsResult{Rulings: rulings, SourceURL: endpoint.String(), FetchedAt: a.now().UTC()}, nil
+}
+
+func (a *Adapter) getJSON(ctx context.Context, endpoint, class string, interval time.Duration, target any) error {
+	exhausted := card.ErrUpstreamUnavailable
+	for attempt := 0; attempt <= a.maxRetries; attempt++ {
+		if err := sharedLimiters.wait(ctx, a.baseURL.Host+"|"+class, interval); err != nil {
+			if errors.Is(err, context.Canceled) {
+				return err
+			}
+			return card.ErrRateLimited
+		}
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+		if err != nil {
+			return err
+		}
+		req.Header.Set("Accept", "application/json")
+		req.Header.Set("User-Agent", userAgent)
+		response, err := a.client.Do(req)
+		if err != nil {
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
+			continue
+		}
+		if response.StatusCode == http.StatusNotFound {
+			response.Body.Close()
+			return card.ErrNotFound
+		}
+		if response.StatusCode == http.StatusTooManyRequests || response.StatusCode >= 500 {
+			retryAfter := parseRetryAfter(response.Header.Get("Retry-After"), a.now())
+			response.Body.Close()
+			if response.StatusCode == http.StatusTooManyRequests {
+				exhausted = card.ErrRateLimited
+			}
+			if attempt < a.maxRetries && retryAfter > 0 {
+				timer := time.NewTimer(retryAfter)
+				select {
+				case <-ctx.Done():
+					timer.Stop()
+					return ctx.Err()
+				case <-timer.C:
+				}
+			}
+			continue
+		}
+		if response.StatusCode < 200 || response.StatusCode >= 300 {
+			response.Body.Close()
+			return card.ErrInvalidIdentifier
+		}
+		err = json.NewDecoder(response.Body).Decode(target)
+		response.Body.Close()
+		if err != nil {
+			return fmt.Errorf("decode Scryfall response: %w", err)
+		}
+		return nil
+	}
+	return exhausted
 }
 
 func translatePrinting(raw upstreamPrinting) card.Printing {
