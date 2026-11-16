@@ -83,6 +83,41 @@ func New(adapter card.Adapter) *mcp.Server {
 		result.FetchedAt = result.FetchedAt.UTC()
 		return &mcp.CallToolResult{StructuredContent: result}, nil
 	})
+	server.AddTool(&mcp.Tool{
+		Name:        "get_card_legality",
+		Description: "Resolve one Oracle card and return its authoritative format-legality statuses.",
+		InputSchema: map[string]any{
+			"type":                 "object",
+			"additionalProperties": false,
+			"properties": map[string]any{
+				"name":      map[string]any{"type": "string", "description": "Canonical card name matched exactly, case-insensitively."},
+				"oracle_id": map[string]any{"type": "string", "format": "uuid", "description": "Oracle identity UUID."},
+			},
+		},
+	}, func(ctx context.Context, request *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		var input struct {
+			Name     string `json:"name"`
+			OracleID string `json:"oracle_id"`
+		}
+		if err := json.Unmarshal(request.Params.Arguments, &input); err != nil {
+			return toolError("invalid_identifier", "provide exactly one valid selector"), nil
+		}
+		input.Name = strings.TrimSpace(input.Name)
+		input.OracleID = strings.TrimSpace(input.OracleID)
+		if (input.Name == "") == (input.OracleID == "") || (input.OracleID != "" && !uuidPattern.MatchString(input.OracleID)) {
+			return toolError("invalid_identifier", "provide exactly one valid name or Oracle ID"), nil
+		}
+		legalityAdapter, ok := adapter.(card.LegalityAdapter)
+		if !ok {
+			return toolError("internal_error", "an internal error occurred"), nil
+		}
+		result, err := legalityAdapter.GetCardLegality(ctx, card.OracleCardSelector{Name: input.Name, OracleID: input.OracleID})
+		if err != nil {
+			return exactLookupError("get_card_legality", "no Oracle card matched the exact selector", err)
+		}
+		result.FetchedAt = result.FetchedAt.UTC()
+		return &mcp.CallToolResult{StructuredContent: result}, nil
+	})
 	return server
 }
 

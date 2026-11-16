@@ -238,6 +238,46 @@ func TestOracleIDLookupUsesExactOracleQuery(t *testing.T) {
 	}
 }
 
+func TestCardLegalityTranslatesOnlyIdentityAndCompleteStatusMap(t *testing.T) {
+	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		if r.URL.Path != "/cards/named" || r.URL.Query().Get("exact") != "Example" {
+			t.Errorf("request URL = %s", r.URL)
+		}
+		return response(http.StatusOK, `{
+          "oracle_id":"11111111-1111-4111-8111-111111111111","name":"Example",
+          "legalities":{"standard":"legal","future":"not_legal","vintage":"restricted","legacy":"banned"},
+          "prices":{"usd":"999.99"},"oracle_text":"must not leak into legality"
+        }`), nil
+	})}
+	result, err := scryfall.NewAdapter("https://api.scryfall.test", client).GetCardLegality(context.Background(), card.OracleCardSelector{Name: "Example"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Legality.OracleID != "11111111-1111-4111-8111-111111111111" || result.Legality.Name != "Example" || len(result.Legality.Formats) != 4 {
+		t.Fatalf("legality = %#v", result.Legality)
+	}
+	if result.Legality.Formats["standard"] != card.LegalityLegal || result.Legality.Formats["future"] != card.LegalityNotLegal || result.Legality.Formats["vintage"] != card.LegalityRestricted || result.Legality.Formats["legacy"] != card.LegalityBanned {
+		t.Fatalf("formats = %#v", result.Legality.Formats)
+	}
+	if result.SourceURL == "" || result.FetchedAt.IsZero() || result.Stale {
+		t.Fatalf("provenance = %#v", result)
+	}
+}
+
+func TestCardLegalityByOracleIDUsesExactOracleQuery(t *testing.T) {
+	id := "11111111-1111-4111-8111-111111111111"
+	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		if r.URL.Path != "/cards/search" || r.URL.Query().Get("q") != "oracleid:"+id || r.URL.Query().Get("unique") != "cards" {
+			t.Errorf("request URL = %s", r.URL)
+		}
+		return response(http.StatusOK, `{"data":[{"oracle_id":"`+id+`","name":"Example","legalities":{"commander":"legal"}}]}`), nil
+	})}
+	result, err := scryfall.NewAdapter("https://api.scryfall.test", client).GetCardLegality(context.Background(), card.OracleCardSelector{OracleID: id})
+	if err != nil || result.Legality.Formats["commander"] != card.LegalityLegal {
+		t.Fatalf("result=%#v err=%v", result, err)
+	}
+}
+
 func TestScryfallNotFoundIsDomainNotFound(t *testing.T) {
 	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) { return response(http.StatusNotFound, `{}`), nil })}
 	_, err := scryfall.NewAdapter("https://api.scryfall.test", client).GetOracleCard(context.Background(), card.OracleCardSelector{Name: "Missing"})

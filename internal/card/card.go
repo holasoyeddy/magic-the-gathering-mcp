@@ -86,6 +86,28 @@ type PrintingResult struct {
 	Stale     bool      `json:"stale"`
 }
 
+type LegalityStatus string
+
+const (
+	LegalityLegal      LegalityStatus = "legal"
+	LegalityNotLegal   LegalityStatus = "not_legal"
+	LegalityRestricted LegalityStatus = "restricted"
+	LegalityBanned     LegalityStatus = "banned"
+)
+
+type CardLegality struct {
+	OracleID string                    `json:"oracle_id"`
+	Name     string                    `json:"name"`
+	Formats  map[string]LegalityStatus `json:"formats"`
+}
+
+type LegalityResult struct {
+	Legality  CardLegality `json:"legality"`
+	SourceURL string       `json:"source_url"`
+	FetchedAt time.Time    `json:"fetched_at"`
+	Stale     bool         `json:"stale"`
+}
+
 var ErrNotFound = errors.New("oracle card not found")
 
 var (
@@ -98,4 +120,8 @@ var (
 type Adapter interface {
 	GetOracleCard(context.Context, OracleCardSelector) (OracleCardResult, error)
 	GetPrinting(context.Context, PrintingSelector) (PrintingResult, error)
+}
+
+type LegalityAdapter interface {
+	GetCardLegality(context.Context, OracleCardSelector) (LegalityResult, error)
 }

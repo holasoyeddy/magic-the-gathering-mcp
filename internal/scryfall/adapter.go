@@ -60,18 +60,19 @@ func NewAdapterWithOptions(baseURL string, client *http.Client, options Options)
 }
 
 type upstreamCard struct {
-	OracleID      string         `json:"oracle_id"`
-	Name          string         `json:"name"`
-	Layout        string         `json:"layout"`
-	ManaCost      *string        `json:"mana_cost"`
-	CMC           float64        `json:"cmc"`
-	TypeLine      *string        `json:"type_line"`
-	OracleText    *string        `json:"oracle_text"`
-	Colors        []string       `json:"colors"`
-	ColorIdentity []string       `json:"color_identity"`
-	Keywords      []string       `json:"keywords"`
-	ProducedMana  []string       `json:"produced_mana"`
-	CardFaces     []upstreamFace `json:"card_faces"`
+	OracleID      string                         `json:"oracle_id"`
+	Name          string                         `json:"name"`
+	Layout        string                         `json:"layout"`
+	ManaCost      *string                        `json:"mana_cost"`
+	CMC           float64                        `json:"cmc"`
+	TypeLine      *string                        `json:"type_line"`
+	OracleText    *string                        `json:"oracle_text"`
+	Colors        []string                       `json:"colors"`
+	ColorIdentity []string                       `json:"color_identity"`
+	Keywords      []string                       `json:"keywords"`
+	ProducedMana  []string                       `json:"produced_mana"`
+	CardFaces     []upstreamFace                 `json:"card_faces"`
+	Legalities    map[string]card.LegalityStatus `json:"legalities"`
 }
 type upstreamFace struct {
 	Name        string            `json:"name"`
@@ -158,6 +159,98 @@ func (a *Adapter) GetOracleCard(ctx context.Context, selector card.OracleCardSel
 		}
 	}
 	return card.OracleCardResult{}, exhaustedError
+}
+
+func (a *Adapter) GetCardLegality(ctx context.Context, selector card.OracleCardSelector) (card.LegalityResult, error) {
+	if a.baseURL == nil || a.baseURL.Scheme != "https" || a.baseURL.Host == "" {
+		return card.LegalityResult{}, card.ErrUpstreamUnavailable
+	}
+	endpoint := *a.baseURL
+	endpoint.Path = strings.TrimRight(endpoint.Path, "/") + "/cards/named"
+	endpoint.RawQuery = url.Values{"exact": {selector.Name}}.Encode()
+	isSearch := selector.OracleID != ""
+	if isSearch {
+		endpoint.Path = strings.TrimRight(a.baseURL.Path, "/") + "/cards/search"
+		endpoint.RawQuery = url.Values{"q": {"oracleid:" + selector.OracleID}, "unique": {"cards"}}.Encode()
+	}
+	exhaustedError := card.ErrUpstreamUnavailable
+	for attempt := 0; attempt <= a.maxRetries; attempt++ {
+		if err := sharedLimiters.wait(ctx, a.baseURL.Host+"|named-search", a.namedInterval); err != nil {
+			if errors.Is(err, context.Canceled) {
+				return card.LegalityResult{}, err
+			}
+			return card.LegalityResult{}, card.ErrRateLimited
+		}
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint.String(), nil)
+		if err != nil {
+			return card.LegalityResult{}, err
+		}
+		req.Header.Set("Accept", "application/json")
+		req.Header.Set("User-Agent", userAgent)
+		response, err := a.client.Do(req)
+		if err != nil {
+			if ctx.Err() != nil {
+				return card.LegalityResult{}, ctx.Err()
+			}
+			continue
+		}
+		result, retry, retryAfter, err := a.consumeLegality(response, endpoint.String(), isSearch)
+		if !retry {
+			return result, err
+		}
+		if errors.Is(err, card.ErrRateLimited) {
+			exhaustedError = card.ErrRateLimited
+		}
+		if attempt < a.maxRetries && retryAfter > 0 {
+			timer := time.NewTimer(retryAfter)
+			select {
+			case <-ctx.Done():
+				timer.Stop()
+				return card.LegalityResult{}, ctx.Err()
+			case <-timer.C:
+			}
+		}
+	}
+	return card.LegalityResult{}, exhaustedError
+}
+
+func (a *Adapter) consumeLegality(response *http.Response, endpoint string, isSearch bool) (card.LegalityResult, bool, time.Duration, error) {
+	defer response.Body.Close()
+	if response.StatusCode == http.StatusNotFound {
+		io.Copy(io.Discard, response.Body)
+		return card.LegalityResult{}, false, 0, card.ErrNotFound
+	}
+	if response.StatusCode == http.StatusTooManyRequests {
+		io.Copy(io.Discard, response.Body)
+		return card.LegalityResult{}, true, parseRetryAfter(response.Header.Get("Retry-After"), a.now()), card.ErrRateLimited
+	}
+	if response.StatusCode >= 500 {
+		io.Copy(io.Discard, response.Body)
+		return card.LegalityResult{}, true, 0, card.ErrUpstreamUnavailable
+	}
+	if response.StatusCode < 200 || response.StatusCode >= 300 {
+		io.Copy(io.Discard, response.Body)
+		return card.LegalityResult{}, false, 0, card.ErrInvalidIdentifier
+	}
+	var raw upstreamCard
+	if isSearch {
+		var page struct {
+			Data []upstreamCard `json:"data"`
+		}
+		if err := json.NewDecoder(response.Body).Decode(&page); err != nil {
+			return card.LegalityResult{}, false, 0, fmt.Errorf("decode Scryfall response: %w", err)
+		}
+		if len(page.Data) != 1 {
+			return card.LegalityResult{}, false, 0, card.ErrNotFound
+		}
+		raw = page.Data[0]
+	} else if err := json.NewDecoder(response.Body).Decode(&raw); err != nil {
+		return card.LegalityResult{}, false, 0, fmt.Errorf("decode Scryfall response: %w", err)
+	}
+	return card.LegalityResult{
+		Legality:  card.CardLegality{OracleID: raw.OracleID, Name: raw.Name, Formats: raw.Legalities},
+		SourceURL: endpoint, FetchedAt: a.now().UTC(), Stale: false,
+	}, false, 0, nil
 }
 
 func (a *Adapter) consume(response *http.Response, endpoint string, isSearch bool) (card.OracleCardResult, bool, time.Duration, error) {

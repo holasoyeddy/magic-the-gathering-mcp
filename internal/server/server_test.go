@@ -149,8 +149,8 @@ func TestDiscoveryListsExactLookupToolsInDeterministicOrder(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(result.Tools) != 2 || result.Tools[0].Name != "get_oracle_card" || result.Tools[1].Name != "get_printing" {
-		t.Fatalf("tools = %#v, want get_oracle_card then get_printing", result.Tools)
+	if len(result.Tools) != 3 || result.Tools[0].Name != "get_card_legality" || result.Tools[1].Name != "get_oracle_card" || result.Tools[2].Name != "get_printing" {
+		t.Fatalf("tools = %#v, want deterministic alphabetical order", result.Tools)
 	}
 }
 

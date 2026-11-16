@@ -131,6 +131,19 @@ func (c *Cache) GetPrinting(ctx context.Context, selector card.PrintingSelector)
 	return value.(card.PrintingResult), nil
 }
 
+func (c *Cache) GetCardLegality(ctx context.Context, selector card.OracleCardSelector) (card.LegalityResult, error) {
+	inner, ok := c.inner.(card.LegalityAdapter)
+	if !ok {
+		return card.LegalityResult{}, errors.New("adapter does not support card legality")
+	}
+	key := legalityKey(selector)
+	value, err := c.get(ctx, "card-legality", key, func() (any, error) { return inner.GetCardLegality(ctx, selector) })
+	if err != nil {
+		return card.LegalityResult{}, err
+	}
+	return value.(card.LegalityResult), nil
+}
+
 func oracleKey(s card.OracleCardSelector) string {
 	if s.OracleID != "" {
 		return "v1:oracle-card:oracle-id:" + strings.ToLower(strings.TrimSpace(s.OracleID))
@@ -142,6 +155,12 @@ func printingKey(s card.PrintingSelector) string {
 		return "v1:printing:scryfall-id:" + strings.ToLower(strings.TrimSpace(s.ScryfallID))
 	}
 	return "v1:printing:catalog:" + strings.ToLower(strings.TrimSpace(s.SetCode)) + ":" + strings.TrimSpace(s.CollectorNumber)
+}
+func legalityKey(s card.OracleCardSelector) string {
+	if s.OracleID != "" {
+		return "v1:card-legality:oracle-id:" + strings.ToLower(strings.TrimSpace(s.OracleID))
+	}
+	return "v1:card-legality:exact-name:" + strings.ToLower(strings.TrimSpace(s.Name))
 }
 
 func (c *Cache) get(ctx context.Context, operation, key string, live func() (any, error)) (any, error) {
@@ -196,6 +215,9 @@ func markStale(value any) any {
 	case card.PrintingResult:
 		result.Stale = true
 		return result
+	case card.LegalityResult:
+		result.Stale = true
+		return result
 	}
 	return value
 }
@@ -217,6 +239,8 @@ func (c *Cache) read(operation, key string) (any, time.Duration, bool) {
 		value = &card.OracleCardResult{}
 	case "printing":
 		value = &card.PrintingResult{}
+	case "card-legality":
+		value = &card.LegalityResult{}
 	default:
 		return nil, 0, false
 	}
@@ -246,6 +270,9 @@ func (c *Cache) read(operation, key string) (any, time.Duration, bool) {
 	case *card.PrintingResult:
 		result.Stale = false
 		return *result, age, true
+	case *card.LegalityResult:
+		result.Stale = false
+		return *result, age, true
 	}
 	return nil, 0, false
 }
@@ -260,6 +287,8 @@ func (c *Cache) write(operation, key string, value any) error {
 	case card.OracleCardResult:
 		fetched = result.FetchedAt.UTC()
 	case card.PrintingResult:
+		fetched = result.FetchedAt.UTC()
+	case card.LegalityResult:
 		fetched = result.FetchedAt.UTC()
 	}
 	if fetched.IsZero() {
