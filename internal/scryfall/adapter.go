@@ -237,32 +237,67 @@ func (r *limiterRegistry) wait(ctx context.Context, host string, interval time.D
 }
 
 func (a *Adapter) GetPrinting(ctx context.Context, selector card.PrintingSelector) (card.PrintingResult, error) {
-	endpoint := a.baseURL + "/cards/" + url.PathEscape(selector.ScryfallID)
+	endpointURL := *a.baseURL
+	endpointURL.Path = strings.TrimRight(endpointURL.Path, "/") + "/cards/" + url.PathEscape(selector.ScryfallID)
 	if selector.ScryfallID == "" {
-		endpoint = a.baseURL + "/cards/" + url.PathEscape(strings.ToLower(selector.SetCode)) + "/" + url.PathEscape(selector.CollectorNumber)
+		endpointURL.Path = strings.TrimRight(a.baseURL.Path, "/") + "/cards/" + url.PathEscape(strings.ToLower(selector.SetCode)) + "/" + url.PathEscape(selector.CollectorNumber)
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
-	if err != nil {
-		return card.PrintingResult{}, err
+	endpoint := endpointURL.String()
+	exhaustedError := card.ErrUpstreamUnavailable
+	for attempt := 0; attempt <= a.maxRetries; attempt++ {
+		if err := sharedLimiters.wait(ctx, a.baseURL.Host, a.interval); err != nil {
+			if errors.Is(err, context.Canceled) {
+				return card.PrintingResult{}, err
+			}
+			return card.PrintingResult{}, card.ErrRateLimited
+		}
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+		if err != nil {
+			return card.PrintingResult{}, err
+		}
+		req.Header.Set("Accept", "application/json")
+		req.Header.Set("User-Agent", userAgent)
+		response, err := a.client.Do(req)
+		if err != nil {
+			if ctx.Err() != nil {
+				return card.PrintingResult{}, ctx.Err()
+			}
+			continue
+		}
+		if response.StatusCode == http.StatusNotFound {
+			response.Body.Close()
+			return card.PrintingResult{}, card.ErrNotFound
+		}
+		if response.StatusCode == http.StatusTooManyRequests || response.StatusCode >= 500 {
+			retryAfter := parseRetryAfter(response.Header.Get("Retry-After"), a.now())
+			response.Body.Close()
+			if response.StatusCode == http.StatusTooManyRequests {
+				exhaustedError = card.ErrRateLimited
+			}
+			if attempt < a.maxRetries && retryAfter > 0 {
+				timer := time.NewTimer(retryAfter)
+				select {
+				case <-ctx.Done():
+					timer.Stop()
+					return card.PrintingResult{}, ctx.Err()
+				case <-timer.C:
+				}
+			}
+			continue
+		}
+		if response.StatusCode < 200 || response.StatusCode >= 300 {
+			response.Body.Close()
+			return card.PrintingResult{}, card.ErrInvalidIdentifier
+		}
+		var raw upstreamPrinting
+		decodeErr := json.NewDecoder(response.Body).Decode(&raw)
+		response.Body.Close()
+		if decodeErr != nil {
+			return card.PrintingResult{}, fmt.Errorf("decode Scryfall response: %w", decodeErr)
+		}
+		return card.PrintingResult{Printing: translatePrinting(raw), SourceURL: endpoint, FetchedAt: a.now().UTC(), Stale: false}, nil
 	}
-	req.Header.Set("Accept", "application/json")
-	req.Header.Set("User-Agent", "magic-the-gathering-mcp/0.1 (+https://github.com/holasoyeddy/magic-the-gathering-mcp)")
-	response, err := a.client.Do(req)
-	if err != nil {
-		return card.PrintingResult{}, err
-	}
-	defer response.Body.Close()
-	if response.StatusCode == http.StatusNotFound {
-		return card.PrintingResult{}, card.ErrNotFound
-	}
-	if response.StatusCode < 200 || response.StatusCode >= 300 {
-		return card.PrintingResult{}, fmt.Errorf("scryfall returned HTTP %d", response.StatusCode)
-	}
-	var raw upstreamPrinting
-	if err := json.NewDecoder(response.Body).Decode(&raw); err != nil {
-		return card.PrintingResult{}, err
-	}
-	return card.PrintingResult{Printing: translatePrinting(raw), SourceURL: endpoint, FetchedAt: a.now().UTC(), Stale: false}, nil
+	return card.PrintingResult{}, exhaustedError
 }
 
 func translatePrinting(raw upstreamPrinting) card.Printing {

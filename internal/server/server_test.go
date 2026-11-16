@@ -86,6 +86,10 @@ func (f adapterFunc) GetOracleCard(ctx context.Context, selector card.OracleCard
 	return f(ctx, selector)
 }
 
+func (f adapterFunc) GetPrinting(context.Context, card.PrintingSelector) (card.PrintingResult, error) {
+	return card.PrintingResult{}, errors.New("unexpected printing call")
+}
+
 func (f *fakeAdapter) GetOracleCard(_ context.Context, selector card.OracleCardSelector) (card.OracleCardResult, error) {
 	f.calls = append(f.calls, selector)
 	return f.result, f.err
